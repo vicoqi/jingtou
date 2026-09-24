@@ -1,0 +1,44 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { getTimeline, shotAtTime, newShot, validateProject, mergeGeneration } from '../lib/domain.ts';
+import type { Project, Shot } from '../lib/types.ts';
+
+const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', duration, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
+const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
+
+test('timeline preserves ordering and end boundary belongs to next shot', () => {
+  const shots = [shot('a', 3), shot('b', 7)];
+  assert.deepEqual(getTimeline(shots).map(({shot, start, end}) => [shot.id, start, end]), [['a', 0, 3], ['b', 3, 10]]);
+  assert.equal(shotAtTime(shots, 0)?.id, 'a');
+  assert.equal(shotAtTime(shots, 3)?.id, 'b');
+  assert.equal(shotAtTime(shots, 10), null);
+});
+
+test('new shot starts empty at five seconds', () => {
+  const result = newShot();
+  assert.equal(result.duration, 5);
+  assert.equal(result.status, 'idle');
+  assert.equal(result.selectedCandidateId, null);
+});
+
+test('validation rejects invalid duration and malformed reference URLs', () => {
+  assert.throws(() => validateProject(project([shot('x', 0)])), /duration/i);
+  const p = project([shot('x')]);
+  p.characters.push({id:'c', name:'C', description:'', references:[{id:'r', name:'bad', url:'https://outside.example/a.jpg'}]});
+  assert.throws(() => validateProject(p), /reference/i);
+});
+
+test('generation merge preserves selection, candidate history and unrelated edits', () => {
+  const prior = shot('a');
+  prior.candidates.push({id:'old', url:'/api/assets/old', createdAt:'', prompt:'', batchId:'old', source:'generated'});
+  prior.selectedCandidateId = 'old';
+  prior.status = 'generating';
+  prior.generationId = 'job';
+  const current = project([prior, shot('b')]);
+  current.shots[1].description = 'concurrent edit';
+  const next = mergeGeneration(current, 'a', 'job', [{id:'new', url:'/api/assets/new', createdAt:'', prompt:'', batchId:'job', source:'generated'}]);
+  assert.equal(next.shots[0].selectedCandidateId, 'old');
+  assert.deepEqual(next.shots[0].candidates.map(c => c.id), ['old','new']);
+  assert.equal(next.shots[1].description, 'concurrent edit');
+  assert.equal(next.shots[0].status, 'idle');
+});
