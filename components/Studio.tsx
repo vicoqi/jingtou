@@ -1,7 +1,7 @@
 'use client';
 import { useRef, useState, type ChangeEvent } from 'react';
 import Link from 'next/link';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronRight, Clapperboard, Clock3, CloudCheck, Copy, Film, FolderOpen, ImagePlus, Images, LayoutGrid, List, LoaderCircle, Maximize2, Menu, MessageSquare, Plus, RotateCcw, Settings2, Sparkles, Trash2, Upload, UsersRound, WandSparkles, X, Play, AlertCircle } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronRight, Clapperboard, Clock3, CloudCheck, Copy, Film, FolderOpen, House, ImagePlus, Images, LayoutGrid, List, LoaderCircle, Maximize2, Menu, MessageSquare, Plus, RotateCcw, Settings2, Sparkles, Trash2, Upload, UsersRound, WandSparkles, X, Play, AlertCircle } from 'lucide-react';
 import type { Candidate, Project, Shot } from '../lib/types';
 import { newShot } from '../lib/domain';
 import { formatTime, moveItem } from '../lib/playback';
@@ -56,12 +56,14 @@ export function Studio() {
     } catch (e) { studio.setError((e as Error).message); } finally { setUploading(false); }
   }
   function choose(candidate: Candidate) { patchShot({ selectedCandidateId: candidate.id }); }
+  const goHome = () => { void studio.home(); setPage('shots'); setMobileNav(false); };
   const status = studio.saveState === '保存失败' ? 'error' : studio.saveState === '已保存' ? 'saved' : 'saving';
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
-      <Link className="brand" href="/" aria-label="镜头创作工作台"><span className="brand-symbol"><Clapperboard size={23} strokeWidth={1.8} /></span><span className="brand-name">镜头<span>JINGTOU STUDIO</span></span><span className="beta">BETA</span></Link>
+      <Link className="brand" href="/" aria-label="返回首页" onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); if (!disabled) goHome(); }}><span className="brand-symbol"><Clapperboard size={23} strokeWidth={1.8} /></span><span className="brand-name">镜头<span>JINGTOU STUDIO</span></span><span className="beta">BETA</span></Link>
       <div className="workspace-label">个人创作空间 <span>⌘</span></div>
-      <button className={`nav-item ${page === 'shots' ? 'active' : ''}`} onClick={() => { setPage('shots'); setMobileNav(false); }}><Clapperboard size={18} />分镜工作台<span className="nav-dot" /></button>
+      <button className={`nav-item ${!project ? 'active' : ''}`} disabled={disabled} onClick={goHome}><House size={18} />首页</button>
+      <button className={`nav-item ${project && page === 'shots' ? 'active' : ''}`} disabled={!project} onClick={() => { setPage('shots'); setMobileNav(false); }}><Clapperboard size={18} />分镜工作台<span className="nav-dot" /></button>
       <button className={`nav-item ${page === 'characters' ? 'active' : ''}`} disabled={!project} onClick={() => { setPage('characters'); setMobileNav(false); }}><UsersRound size={18} />角色库<span className="nav-count">{project?.characters.length || 0}</span></button>
       <div className="sidebar-divider" />
       <div className="sidebar-section-title"><span>我的作品</span><button className="icon-button" aria-label="创建作品" disabled={disabled} onClick={() => { setModal('create'); setNewName(''); }}><Plus size={16} /></button></div>
@@ -71,7 +73,7 @@ export function Studio() {
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="收起导航" onClick={() => setMobileNav(false)} />}
     <main className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><span>我的作品</span><ChevronRight size={14} /><button disabled={!project || disabled} onClick={() => setModal('project')}>{project?.name || '创作工作台'}<ChevronDown size={13} /></button></div><div className="topbar-actions"><span role="status" className={`save-status ${status}`}>{status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><button disabled={disabled} onClick={goHome} aria-label="返回首页">首页</button><ChevronRight size={14} /><button disabled={!project || disabled} onClick={() => setModal('project')}>{project?.name || '创作工作台'}<ChevronDown size={13} /></button></div><div className="topbar-actions"><span role="status" className={`save-status ${status}`}>{status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></div></header>
       {studio.error && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>{studio.error}</span>{studio.saveState === '保存失败' && <button onClick={() => void studio.flush().catch(() => {})}>重试保存</button>}<button onClick={() => setModal('reload')}>重新加载</button><button className="icon-button" aria-label="关闭提示" onClick={() => studio.setError('')}><X size={15} /></button></div>}
       {studio.loading ? <div className="loading-state"><LoaderCircle size={30} className="spin" /><h2>正在打开创作空间</h2><p>你的故事，即将续写。</p></div> : !project ? <section className="welcome">
         <div className="welcome-copy"><span className="eyebrow">A STORY IN EVERY FRAME</span><h1>让故事，<br /><em>一帧帧发生。</em></h1><p>从一个角色、一段对白开始。<br />把脑海中的故事，变成属于你的动漫短剧。</p><div className="row"><button className="button primary large" disabled={disabled} onClick={() => { setNewName(''); setModal('create'); }}><Plus size={18} />开始我的作品</button><button className="button large" disabled={disabled} onClick={() => void studio.create('夏日来信', true)}>{busy ? <LoaderCircle className="spin" size={17} /> : <Play size={17} />}体验示例作品</button></div><div className="welcome-steps"><span>01 设定角色</span><span>02 编排分镜</span><span>03 让画面发生</span></div></div><div className="welcome-art"><img src="/samples/summer.png" alt="夏日海边车站中相遇的两位动漫角色" /><span className="art-corner top-left" /><span className="art-corner bottom-right" /><div className="welcome-art-caption"><span>夏日来信</span><span>原创示例画面 · 16:9</span></div></div>

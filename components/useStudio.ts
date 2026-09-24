@@ -1,8 +1,9 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Project, ProjectSummary } from '../lib/types';
 import { api, getProject, listProjects, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
+import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 
 export function useStudio() {
   const [project, setProject] = useState<Project | null>(null);
@@ -10,6 +11,7 @@ export function useStudio() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  const [navigating, setNavigating] = useState(false);
   const [saveState, setSaveState] = useState('已保存');
   const [error, setError] = useState('');
   const [config, setConfig] = useState({ configured: false, model: '' });
@@ -47,17 +49,35 @@ export function useStudio() {
     replace(fn(current.current)); dirty.current = true; setSaveState('等待保存…');
     clearTimeout(timer.current); timer.current = setTimeout(() => { void flush().catch(() => {}); }, 600);
   }, [replace, flush]);
+  const writeLocation = useCallback((id: string | null, mode: 'push' | 'replace') => {
+    const url = projectLocation(id);
+    if (mode === 'push' && `${window.location.pathname}${window.location.search}${window.location.hash}` === url) return;
+    window.history[mode === 'push' ? 'pushState' : 'replaceState'](window.history.state, '', url);
+  }, []);
+  const navigation = useMemo(() => createProjectNavigation<Project>({
+    current: () => current.current,
+    save: flush,
+    load: async id => (await getProject(id)).project,
+    show: replace,
+    write: writeLocation,
+    loading: setNavigating,
+    error: setError,
+  }), [flush, replace, writeLocation]);
   useEffect(() => {
+    let active = true;
     alive.current = true;
+    const initialVersion = navigation.version;
     Promise.all([listProjects(), api<{ configured: boolean; model: string }>('/api/config')]).then(async ([list, settings]) => {
-      if (!alive.current) return;
+      if (!active) return;
       setProjects(list.projects); setConfig(settings);
-      if (list.projects[0]) { const result = await getProject(list.projects[0].id); if (alive.current) replace(result.project); }
-    }).catch(e => { if (alive.current) setError(e.message); }).finally(() => { if (alive.current) setLoading(false); });
+      if (navigation.version === initialVersion) await navigation.navigate(projectIdFromLocation(window.location.href), 'none');
+    }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); });
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty.current || pending.current) { event.preventDefault(); event.returnValue = ''; } };
+    const popState = () => { void navigation.navigate(projectIdFromLocation(window.location.href), 'none'); };
     window.addEventListener('beforeunload', beforeUnload);
-    return () => { alive.current = false; clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); };
-  }, [replace]);
+    window.addEventListener('popstate', popState);
+    return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
+  }, [navigation]);
   const generating = project?.shots.some(s => s.status === 'generating') ?? false;
   const projectId = project?.id;
   useEffect(() => {
@@ -69,41 +89,66 @@ export function useStudio() {
     return () => clearInterval(interval);
   }, [generating, working, projectId, replace]);
   async function open(id: string) {
-    setWorking(true); setError('');
-    try { await flush(); const result = await getProject(id); replace(result.project); await refreshList(); }
-    catch (e) { setError((e as Error).message); } finally { setWorking(false); }
+    if (await navigation.navigate(id)) await refreshList().catch(e => setError(e.message));
+  }
+  async function home() {
+    if (await navigation.navigate(null)) await refreshList().catch(e => setError(e.message));
   }
   async function create(name: string, demo = false) {
     setWorking(true); setError('');
-    try { await flush(); const result = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name, demo }) }); replace(result.project); await refreshList(); return true; }
+    const version = navigation.version;
+    try {
+      await flush();
+      const result = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name, demo }) });
+      if (navigation.version === version) { replace(result.project); writeLocation(result.project.id, 'push'); }
+      await refreshList(); return true;
+    }
     catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
   async function generate(shotId: string, count: number) {
     if (!current.current) return;
     setWorking(true); setError('');
     const id = current.current.id;
+    const version = navigation.version;
     try {
       await flush();
+      if (current.current?.id !== id || navigation.version !== version) return;
       replace({ ...current.current!, shots: current.current!.shots.map(s => s.id === shotId ? { ...s, status: 'generating', error: null } : s) });
       const result = await api<{ project: Project }>(`/api/projects/${id}/generate`, { method: 'POST', body: JSON.stringify({ shotId, count }) });
-      replace(result.project); await refreshList();
+      if (current.current?.id === id && navigation.version === version) replace(result.project);
+      await refreshList();
     } catch (e) {
       const message = (e as Error).message;
-      try { if (!dirty.current) replace((await getProject(id)).project); } catch { /* Keep last loaded data visible. */ }
-      setError(message);
+      try {
+        if (!dirty.current && current.current?.id === id && navigation.version === version) {
+          const result = await getProject(id);
+          if (!dirty.current && current.current?.id === id && navigation.version === version) replace(result.project);
+        }
+      } catch { /* Keep last loaded data visible. */ }
+      if (navigation.version === version) setError(message);
     } finally { setWorking(false); }
   }
   async function remove() {
     if (!current.current) return;
     setWorking(true);
-    try { await flush(); await api(`/api/projects/${current.current.id}`, { method: 'DELETE' }); replace(null); dirty.current = false; setSaveState('已保存'); await refreshList(); }
+    const id = current.current.id;
+    try {
+      await flush(); await api(`/api/projects/${id}`, { method: 'DELETE' });
+      if (current.current?.id === id) { await navigation.navigate(null, 'replace'); dirty.current = false; setSaveState('已保存'); }
+      await refreshList();
+    }
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   async function reload() {
     if (!current.current) { window.location.reload(); return; }
     setWorking(true);
-    try { const result = await getProject(current.current.id); dirty.current = false; replace(result.project); setError(''); setSaveState('已保存'); }
+    const id = current.current.id;
+    const version = navigation.version;
+    try {
+      const result = await getProject(id);
+      if (current.current?.id === id && navigation.version === version) { dirty.current = false; replace(result.project); setError(''); setSaveState('已保存'); }
+    }
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
-  return { project, projects, loading, busy: working || generating, saveState, error, setError, config, update, open, create, generate, remove, flush, reload };
+  return { project, projects, loading, busy: working || navigating || generating, saveState, error, setError, config, update, open, home, create, generate, remove, flush, reload };
 }
