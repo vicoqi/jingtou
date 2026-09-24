@@ -57,7 +57,10 @@ JSON API: `GET /api/projects` → `{projects: ProjectSummary[]}`; `POST /api/pro
 - [x] Remove starter skeleton and starter metadata; document provider config, data storage and limitations. Build site-specific image assets and social preview with truthful sample labels.
 - [x] Run tests, TypeScript and production build; review requirement coverage and fix important findings.
 
-### Task 3: Delivery
+### Task 3: Local delivery (user update: 2026-09-24)
 
-- [ ] Use sites-hosting to attempt private deployment of the validated source. Report an actionable blocker if the connector cannot publish.
-- [ ] Deliver the working URL, scope, and exact remaining provider configuration requirement without claiming live generation or consistency was verified without credentials.
+- [x] User explicitly requested local-only delivery and no remote source push. Stop publishing.
+- [x] Local app responds successfully at http://localhost:3000/; provider configuration accurately reports unconfigured.
+- [x] 27 tests, TypeScript, ESLint, production build, and live HTTP smoke passed. Independent review approved the MVP; accessible dialog labels and sidebar summary updates were subsequently fixed.
+- [x] Source saved locally on feat/jingtou-mvp. No Git remote is configured and no source was pushed. An empty private Sites project record had been created before the user's local-only instruction; no version was published.
+- [x] Deliver local URL and README instructions. Live provider generation and manual character-consistency acceptance require the user's model and API key.
