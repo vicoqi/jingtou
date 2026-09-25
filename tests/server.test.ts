@@ -254,12 +254,14 @@ test('generation merges into the latest revision after another shot is edited', 
   p.shots.push(baseShot('a'),baseShot('b'));
   await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
   let release!: () => void;
+  let background: Promise<unknown> | undefined;
   const gate = new Promise<void>(resolve => { release=resolve; });
   const generation = handleApiRequest(request(`/api/projects/${p.id}/generate`,'POST',{shotId:'a',count:1}),env,{fetcher:async()=>{
     await gate;
     return new Response(JSON.stringify({data:[{b64_json:btoa(String.fromCharCode(...png))}]}),{headers:{'content-type':'application/json'}});
-  }});
+  },waitUntil:promise=>{ background=promise; }});
   await new Promise(resolve => setTimeout(resolve,10));
+  assert.ok(background,'generation must be registered as background work before the provider finishes');
   const during = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.equal(during.shots[0].status,'generating');
   during.shots[1].description = 'edit during generation';
@@ -267,6 +269,7 @@ test('generation merges into the latest revision after another shot is edited', 
   assert.equal(saved.status,200);
   release();
   const result = await generation;
+  await background;
   assert.equal(result.status,200);
   const final = (await json(result)).project;
   assert.equal(final.shots[1].description,'edit during generation');

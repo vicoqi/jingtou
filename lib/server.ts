@@ -126,7 +126,7 @@ async function generationResult(env:ApiEnv,owner:string,id:string,shotId:string,
   fail(409,'Project changed repeatedly; reload and retry');
 }
 
-async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch):Promise<Response> {
+async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
   const body=await bodyJson(request);
   const count=body.count;
   if (typeof body.shotId!=='string' || typeof count!=='number' || !Number.isInteger(count) || count<1 || count>4) fail(400,'Choose a shot and 1–4 images');
@@ -145,7 +145,8 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   const started={...current,shots:current.shots.map(s=>s.id===shot.id ? {...s,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:s)};
   const startedSaved=await saveCas(env,started,owner,current.revision);
   if (!startedSaved) fail(409,'Project changed; reload and retry');
-  try {
+  const generation = (async ():Promise<Project> => {
+    try {
     const providerOptions={key,model,baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',prompt,count,aspectRatio:current.aspectRatio,fetcher};
     const output=images.length ? await requestImageEdits({...providerOptions,images}) : await requestImageGeneration(providerOptions);
     const now=new Date().toISOString();
@@ -156,15 +157,23 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
       await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,result.mime,`${shot.title}.${result.mime.split('/')[1]}`).run();
       candidates.push({id:crypto.randomUUID(),url:`/api/assets/${assetId}`,createdAt:now,prompt,batchId:generationId,source:'generated'});
     }
-    return json({project:await generationResult(env,owner,id,shot.id,generationId,candidates)});
+      return await generationResult(env,owner,id,shot.id,generationId,candidates);
+    } catch (error) {
+      const message=error instanceof Error ? error.message : 'Image generation failed';
+      await generationResult(env,owner,id,shot.id,generationId,[],message).catch(()=>{});
+      throw error instanceof Error ? error : new Error(message);
+    }
+  })();
+  // Keep provider work alive if the browser refreshes or closes this request.
+  waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  try {
+    return json({project:await generation});
   } catch (error) {
-    const message=error instanceof Error ? error.message : 'Image generation failed';
-    await generationResult(env,owner,id,shot.id,generationId,[],message).catch(()=>{});
-    fail(502,message);
+    fail(502,error instanceof Error ? error.message : 'Image generation failed');
   }
 }
 
-export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch}={}):Promise<Response> {
+export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
     const owner=ownerOf(request,env);
     const path=new URL(request.url).pathname;
@@ -212,7 +221,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       return json({image:{id,url:`/api/assets/${id}`,name:file.name.slice(0,200)}},201);
     }
     const generateMatch=path.match(generationPath);
-    if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],options.fetcher);
+    if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],options.fetcher,options.waitUntil);
     const match=path.match(projectPath);
     if (match && request.method==='GET') return json({project:await loadRecovered(env,match[1],owner)});
     if (match && request.method==='PUT') {

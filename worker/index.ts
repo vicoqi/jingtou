@@ -37,7 +37,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/api/')) {
-      return handleApiRequest(request, env);
+      return handleApiRequest(request, env, { waitUntil: promise => ctx.waitUntil(promise) });
     }
 
     if (url.pathname === "/_vinext/image") {
