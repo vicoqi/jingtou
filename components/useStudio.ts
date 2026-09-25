@@ -96,7 +96,7 @@ export function useStudio() {
   async function home() {
     if (await navigation.navigate(null)) await refreshList().catch(e => setError(e.message));
   }
-  async function createAndOpen(path: string, body?: { name: string }) {
+  async function createAndOpen(path: string, body?: { name: string; style?: string }) {
     setWorking(true); setError('');
     const version = navigation.version;
     try {
@@ -107,7 +107,7 @@ export function useStudio() {
     }
     catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
-  const create = (name: string) => createAndOpen('/api/projects', { name });
+  const create = (name: string, style: string) => createAndOpen('/api/projects', { name, style });
   const openSample = () => open(SAMPLE_PROJECT_ID);
   const copySample = () => isReadOnlyProject(current.current)
     ? createAndOpen(`/api/projects/${SAMPLE_PROJECT_ID}/copy`)

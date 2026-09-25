@@ -196,7 +196,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (path==='/api/projects' && request.method==='POST') {
       const body=await bodyJson(request);
       if (!body || typeof body.name!=='string' || !body.name.trim() || body.name.length>120 || (body.demo!==undefined && typeof body.demo!=='boolean')) fail(400,'Enter a project name');
-      const project=createProject(body.name,body.demo===true);
+      if (body.style!==undefined && (typeof body.style!=='string' || !body.style.trim() || body.style.length>500)) fail(400,'Enter a visual style');
+      const project=createProject(body.name,body.demo===true,typeof body.style==='string' ? body.style : undefined);
       await env.DB.prepare('INSERT INTO projects (id, owner, revision, document, updated_at) VALUES (?, ?, ?, ?, ?)').bind(project.id,owner,project.revision,JSON.stringify(project),project.updatedAt).run();
       return json({project},201);
     }

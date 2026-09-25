@@ -193,6 +193,13 @@ test('project save uses revision checks and owner scope', async () => {
   assert.equal((await handleApiRequest(request(`/api/projects/${p.id}`,'GET',undefined,'b@example.com'),env)).status, 404);
 });
 
+test('new projects persist the requested visual style', async () => {
+  const response = await handleApiRequest(request('/api/projects','POST',{name:'Live action',style:'真人电影写实摄影'}),env);
+  assert.equal(response.status,201);
+  assert.equal((await json(response)).project.style,'真人电影写实摄影');
+  assert.equal((await handleApiRequest(request('/api/projects','POST',{name:'Blank style',style:'   '}),env)).status,400);
+});
+
 test('invalid project documents return a client error', async () => {
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'Validation'}),env))).project;
   p.shots.push({id:'bad',title:'Bad',characterIds:[],scene:'',description:'',dialogue:'',duration:0,candidates:[],selectedCandidateId:null,status:'idle',error:null,generationId:null,generationStartedAt:null});
