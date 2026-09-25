@@ -29,8 +29,8 @@ export function buildShotPrompt(project: Project, shot: Shot): string {
   });
   return [
     characters.length
-      ? 'Create one polished static frame for a Chinese animated short drama. Keep the people consistent with the provided character reference images. No speech bubbles, subtitles, watermarks, or text.'
-      : 'Create one polished static frame for a Chinese animated short drama. No speech bubbles, subtitles, watermarks, or text.',
+      ? 'Create one polished static frame for a short drama. Keep the people consistent with the provided character reference images. No speech bubbles, subtitles, watermarks, or text.'
+      : 'Create one polished static frame for a short drama. No speech bubbles, subtitles, watermarks, or text.',
     `Visual style: ${project.style || 'anime illustration'}.`,
     `Shot: ${shot.title}. Scene: ${shot.scene}. Action and composition: ${shot.description}.`,
     characters.length ? `Characters (reference images follow in the same order): ${characters.join('; ')}.` : 'No named characters.',

@@ -14,6 +14,14 @@ test('prompt uses the character description currently in the project', () => {
   assert.doesNotMatch(buildShotPrompt(project, shot), /蓝色短发/);
 });
 
+test('project style is not overridden by a fixed animation instruction', () => {
+  const realistic = structuredClone(project);
+  realistic.style = '电影写实摄影';
+  const prompt = buildShotPrompt(realistic,realistic.shots[0]);
+  assert.match(prompt,/电影写实摄影/);
+  assert.doesNotMatch(prompt,/animated|anime|动漫/i);
+});
+
 test('associated characters must have reference images', () => {
   const refs = project.characters[0].references;
   project.characters[0].references = [];
