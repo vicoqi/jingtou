@@ -15,4 +15,33 @@
 @media(max-width:430px){.project-library-heading>.button{width:32px;padding:0;font-size:0}.project-library-heading>.button svg{width:16px;height:16px}.project-library-cover{width:92px}.project-library-info{padding:10px}.project-library-info small{font-size:8px}}
 .project-library{min-height:calc(100vh - 64px);padding-top:42px;border-bottom:0;background:transparent}.project-library-heading{align-items:center;margin-bottom:28px}.project-library-heading h1{font-family:"Songti SC","Noto Serif SC",serif;font-size:30px;font-weight:550;margin:10px 0 7px}.project-library-grid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}.project-library-cover{width:138px;min-height:94px}.project-library-info{padding:15px}.project-library-info strong{font-size:13px}
 @media(max-width:760px){.project-library{min-height:calc(100vh - 58px);padding-top:30px}.project-library-heading h1{font-size:25px}.project-library-grid{grid-template-columns:1fr}.project-library-cover{width:112px}}
+.project-navigation{margin-top:14px}
+.project-navigation .workspace-tabs{overflow-x:auto;scrollbar-width:thin;min-width:0}
+.project-navigation .workspace-tabs>button{white-space:nowrap}
+.scenes-page{padding:32px 30px}
+.scene-empty{min-height:55vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;text-align:center;color:#8ca678;border:1px dashed #3c4e30;border-radius:9px;padding:35px}
+.scene-empty h2{color:#c3d6ad}.scene-empty p{font-size:12px;line-height:2;color:var(--muted)}
+.scene-workspace{display:grid;grid-template-columns:180px minmax(0,1fr);border:1px solid var(--line);border-radius:8px;background:#181c15;overflow:hidden}
+.scene-list{padding:0 12px 16px;border-right:1px solid var(--line);max-height:850px;overflow-y:auto;scrollbar-width:thin}
+.scene-list .add-shot{width:100%}
+.scene-list-item{width:100%;display:flex;align-items:center;gap:9px;text-align:left;padding:9px 7px;border:1px solid transparent;border-radius:5px;margin-bottom:8px;background:#20271b}
+.scene-list-item.active{border-color:#afcc7d;background:#29351f}
+.scene-list-thumb{display:grid;place-items:center;width:46px;height:40px;flex-shrink:0;overflow:hidden;border-radius:3px;background:#303d26;color:#8ca678}
+.scene-list-thumb img{width:100%;height:100%;object-fit:cover}
+.scene-list-item>span+span{min-width:0;flex:1}.scene-list-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:500}
+.scene-list-item small{font-size:9px;color:#8fa57b;margin-top:7px;display:flex;gap:4px;align-items:center}.scene-list-item small.danger-text{color:var(--danger)}
+.scene-detail{min-width:0;padding:0 22px 22px}
+.scene-detail-heading{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:22px 0}.scene-detail-heading h2{font-size:19px;overflow-wrap:anywhere}.scene-detail-heading p{font-size:10px;color:var(--muted);margin-top:7px}
+.scene-compose{display:grid;grid-template-columns:minmax(0,1fr) 240px;align-items:start;gap:22px}
+.scene-preview{position:relative;display:flex;align-items:center;justify-content:center;border:1px solid #3a442f;border-radius:6px;overflow:hidden;background:#0b0f09;max-height:480px}
+.scene-preview>img{width:100%;height:100%;object-fit:contain}.scene-preview .empty-frame{padding:20px 12px}.scene-preview .empty-frame p{font-size:10px}
+.scene-zoom{position:absolute;right:8px;top:8px;background:#101a0ce0}
+.scene-settings{display:flex;flex-direction:column;gap:13px}.scene-settings .shot-form label{font-size:11px}.scene-settings .shot-form textarea{min-height:140px}.scene-settings .button{font-size:11px}
+.scene-style{font-size:10px;color:#9cad89;line-height:1.8;overflow-wrap:anywhere}.scene-hint{font-size:9px;color:#7f906f;text-align:center;line-height:1.8}
+.scene-candidates .candidate,.scene-candidates .candidate-add{width:145px;min-width:145px}.scene-note{margin-top:20px}
+.shot-scene-fields{display:flex;flex-direction:column;gap:9px}.shot-scene-reference{display:flex;align-items:center;gap:7px;text-align:left;padding:6px;border:1px solid #415534;border-radius:4px;background:#26341d;color:#9fba88}
+.shot-scene-reference img{width:55px;height:35px;object-fit:cover;border-radius:3px}.shot-scene-reference span{font-size:9px;line-height:1.7}.shot-scene-reference.missing{color:#d2b87f;border-color:#615635}
+@media(max-width:1250px){.scene-workspace{grid-template-columns:155px minmax(0,1fr)}.scene-compose{grid-template-columns:minmax(0,1fr) 210px;gap:15px}.scene-detail{padding:0 16px 18px}}
+@media(max-width:1050px){.scene-compose{grid-template-columns:1fr}.scene-settings{display:grid;grid-template-columns:minmax(0,1fr) 190px;align-items:start}.scene-settings .shot-form{display:flex;grid-row:1/4;grid-column:1}.scene-settings .shot-form>label:nth-of-type(2){grid-row:auto}.scene-settings .shot-form textarea{min-height:115px}.scene-settings .scene-style,.scene-settings>.button,.scene-settings .scene-hint{grid-column:2}.shot-form>.shot-scene-fields{grid-row:2;grid-column:1}.shot-form>label.shot-description{grid-row:3;grid-column:1}.shot-form>label.shot-dialogue{grid-row:3;grid-column:2}}
+@media(max-width:760px){.project-navigation{margin-top:10px}.project-navigation .workspace-tabs{gap:18px}.scenes-page{padding:25px 16px}.scene-workspace{display:flex;flex-direction:column}.scene-list{display:flex;gap:8px;border-right:0;border-bottom:1px solid var(--line);padding:12px;overflow-x:auto}.scene-list>.panel-title{display:none}.scene-list-item{min-width:150px;width:150px;margin:0}.scene-list .add-shot{min-width:115px;width:115px;margin:0}.scene-compose{gap:17px}.scene-detail{padding:0 13px 18px}.scene-detail-heading{padding:17px 0}.scene-settings{display:flex}.scene-settings .shot-form{display:flex}.scene-preview{max-height:380px}.scene-empty{padding:30px 15px}.scene-empty h2{font-size:17px}.scene-empty p{font-size:11px}.scene-candidates .candidate,.scene-candidates .candidate-add{width:125px;min-width:125px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}

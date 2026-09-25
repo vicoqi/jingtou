@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Project, ProjectSummary } from '../lib/types';
+import type { GenerationKind, Project, ProjectSummary } from '../lib/types';
 import { api, getProject, listProjects, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
@@ -80,7 +80,7 @@ export function useStudio() {
     window.addEventListener('popstate', popState);
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
   }, [navigation]);
-  const generating = project?.shots.some(s => s.status === 'generating') ?? false;
+  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating');
   const projectId = project?.id;
   useEffect(() => {
     if (!generating || working || !projectId) return;
@@ -114,7 +114,7 @@ export function useStudio() {
   const copySample = () => isReadOnlyProject(current.current)
     ? createAndOpen(`/api/projects/${SAMPLE_PROJECT_ID}/copy`)
     : Promise.resolve(false);
-  async function generate(shotId: string, count: number) {
+  async function generate(shotId: string, count: number, kind: GenerationKind = 'shots') {
     if (!current.current || isReadOnlyProject(current.current)) return;
     setWorking(true); setError('');
     const id = current.current.id;
@@ -122,8 +122,10 @@ export function useStudio() {
     try {
       await flush();
       if (current.current?.id !== id || navigation.version !== version) return;
-      replace({ ...current.current!, shots: current.current!.shots.map(s => s.id === shotId ? { ...s, status: 'generating', error: null } : s) });
-      const result = await api<{ project: Project }>(`/api/projects/${id}/generate`, { method: 'POST', body: JSON.stringify({ shotId, count }) });
+      replace({ ...current.current!, [kind]: (current.current![kind] ?? []).map(s => s.id === shotId ? { ...s, status: 'generating', error: null } : s) });
+      const endpoint = kind === 'scenes' ? 'generate-scene' : 'generate';
+      const target = kind === 'scenes' ? { sceneId: shotId } : { shotId };
+      const result = await api<{ project: Project }>(`/api/projects/${id}/${endpoint}`, { method: 'POST', body: JSON.stringify({ ...target, count }) });
       if (current.current?.id === id && navigation.version === version) replace(result.project);
       await refreshList();
     } catch (e) {
@@ -159,5 +161,6 @@ export function useStudio() {
     }
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
-  return { project, projects, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, remove, flush, reload };
+  const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
+  return { project, projects, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, flush, reload };
 }

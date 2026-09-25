@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApiRequest } from '../lib/server.ts';
 import { createProject } from '../lib/sample.ts';
+import { newScene, newShot } from '../lib/domain.ts';
 
 class MemoryDB {
   projects = new Map<string, any>();
@@ -350,4 +351,184 @@ test('private addresses and client flags do not bypass identity checks outside L
     }),env);
     assert.equal(response.status,401,origin);
   }
+});
+
+const scenePng = new Uint8Array([137,80,78,71,13,10,26,10,1]);
+const sceneOutput = () => new Response(JSON.stringify({data:[{b64_json:btoa(String.fromCharCode(...scenePng))}]}));
+const sceneEnv = () => ({...env,OPENAI_API_KEY:'test-key'});
+async function sceneProject() {
+  const p = (await json(await handleApiRequest(request('/api/projects','POST',{name:'场景制作',style:'电影写实摄影'}),env))).project;
+  p.scenes = [{...newScene(),name:'海边车站',description:'蓝色长椅，白色站棚'}];
+  p.shots.push(newShot());
+  const saved = await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
+  assert.equal(saved.status,200);
+  return (await json(saved)).project;
+}
+
+test('old project documents gain an empty scene library on reload', async () => {
+  const p = await sceneProject();
+  delete p.scenes;
+  db.projects.get(p.id).document = JSON.stringify(p);
+  const reloaded = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.deepEqual(reloaded.scenes,[]);
+});
+
+test('scene generation saves real image bytes and preserves selected history through failure and retry', async () => {
+  const p = await sceneProject();
+  const url = `/api/projects/${p.id}/generate-scene`;
+  const input = {sceneId:p.scenes[0].id,count:1};
+  const result = await handleApiRequest(request(url,'POST',input),sceneEnv(),{fetcher:async (url,init) => {
+    assert.match(String(url),/\/images\/generations$/);
+    const body = JSON.parse(String(init?.body));
+    assert.match(body.prompt,/电影写实摄影/);
+    assert.match(body.prompt,/No people/i);
+    assert.match(body.prompt,/蓝色长椅/);
+    return sceneOutput();
+  }});
+  assert.equal(result.status,200);
+  const generated = (await json(result)).project;
+  assert.deepEqual(generated.shots,p.shots);
+  assert.equal(generated.scenes[0].candidates.length,1);
+  assert.equal(generated.scenes[0].selectedCandidateId,null);
+  const candidate = generated.scenes[0].candidates[0];
+  const image = await handleApiRequest(request(candidate.url),env);
+  assert.deepEqual(new Uint8Array(await image.arrayBuffer()),scenePng);
+  generated.scenes[0].selectedCandidateId = candidate.id;
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:generated}),env)).status,200);
+  assert.equal((await handleApiRequest(request(url,'POST',input),sceneEnv(),{fetcher:async()=>new Response('failure',{status:503})})).status,502);
+  const failed = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.equal(failed.scenes[0].status,'failed');
+  assert.match(failed.scenes[0].error,/503/);
+  assert.equal(failed.scenes[0].selectedCandidateId,candidate.id);
+  assert.deepEqual(failed.scenes[0].candidates,[candidate]);
+  const retry = await handleApiRequest(request(url,'POST',input),sceneEnv(),{fetcher:async()=>sceneOutput()});
+  assert.equal(retry.status,200);
+  const finished = (await json(retry)).project;
+  assert.equal(finished.scenes[0].status,'idle');
+  assert.equal(finished.scenes[0].selectedCandidateId,candidate.id);
+  assert.equal(finished.scenes[0].candidates.length,2);
+  const reloaded = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.deepEqual(reloaded,finished);
+});
+
+test('shot generation sends selected scene bytes after character images', async () => {
+  const p = await sceneProject();
+  const form = new FormData();
+  const characterPng = new Uint8Array([137,80,78,71,13,10,26,10,2]);
+  form.set('file',new File([characterPng],'character.png',{type:'image/png'}));
+  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:form}),env))).image;
+  p.characters = [{id:'c',name:'角色',description:'短发',references:[ref]}];
+  p.shots[0].sceneId = p.scenes[0].id;
+  p.shots[0].characterIds = ['c'];
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
+  const generated = (await json(await handleApiRequest(request(`/api/projects/${p.id}/generate-scene`,'POST',{sceneId:p.scenes[0].id,count:1}),sceneEnv(),{fetcher:async()=>sceneOutput()}))).project;
+  assert.ok(generated,'scene generation must succeed');
+  generated.scenes[0].selectedCandidateId = generated.scenes[0].candidates[0].id;
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:generated}),env);
+  let calls = 0;
+  const response = await handleApiRequest(request(`/api/projects/${p.id}/generate`,'POST',{shotId:p.shots[0].id,count:1}),sceneEnv(),{fetcher:async (url,init)=>{
+    calls++;
+    assert.match(String(url),/\/images\/edits$/);
+    const form = init?.body as FormData;
+    const refs = form.getAll('image') as File[];
+    assert.equal(refs.length,2);
+    assert.deepEqual(new Uint8Array(await refs[0].arrayBuffer()),characterPng);
+    assert.deepEqual(new Uint8Array(await refs[1].arrayBuffer()),scenePng);
+    assert.match(String(form.get('prompt')),/海边车站.*reference image 2/);
+    return sceneOutput();
+  }});
+  assert.equal(response.status,200);
+  assert.equal(calls,1);
+});
+
+test('unselected linked scenes block shot generation before contacting provider', async () => {
+  const p = await sceneProject();
+  p.shots[0].sceneId = p.scenes[0].id;
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
+  let called = false;
+  const result = await handleApiRequest(request(`/api/projects/${p.id}/generate`,'POST',{shotId:p.shots[0].id,count:1}),sceneEnv(),{fetcher:async()=>{called=true;return sceneOutput();}});
+  assert.equal(result.status,400);
+  assert.match((await json(result)).error,/场景.*选定/);
+  assert.equal(called,false);
+});
+
+test('scene generation is background work and merges without losing concurrent edits or selection', async () => {
+  const p = await sceneProject();
+  p.scenes[0].candidates = ['first','second'].map(id=>({id,url:'/samples/summer.png',createdAt:'',prompt:'',batchId:'',source:'sample'}));
+  p.scenes[0].selectedCandidateId = 'first';
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env)).status,200);
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>(resolve=>{release=resolve;});
+  const registered = new Promise<void>(resolve=>{started=resolve;});
+  let background: Promise<unknown> | undefined;
+  const pending = handleApiRequest(request(`/api/projects/${p.id}/generate-scene`,'POST',{sceneId:p.scenes[0].id,count:1}),sceneEnv(),{
+    fetcher:async()=>{await gate;return sceneOutput();},
+    waitUntil:promise=>{background=promise;started();},
+  });
+  // A missing endpoint must fail promptly, rather than hang the test waiting for registration.
+  await Promise.race([registered,pending]);
+  assert.ok(background);
+  try {
+    const during = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+    assert.equal(during.scenes[0].status,'generating');
+    assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-scene`,'POST',{sceneId:p.scenes[0].id,count:1}),sceneEnv())).status,409);
+    during.shots[0].dialogue = '生成时修改的对白';
+    during.scenes[0].description = '生成时修改的场景设定';
+    during.scenes[0].selectedCandidateId = 'second';
+    during.scenes[0].status = 'idle';
+    const saved = (await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:during}),env))).project;
+    assert.equal(saved.scenes[0].status,'generating');
+  } finally { release(); }
+  const response = await pending;
+  await background;
+  assert.equal(response.status,200);
+  const final = (await json(response)).project;
+  assert.equal(final.shots[0].dialogue,'生成时修改的对白');
+  assert.equal(final.scenes[0].description,'生成时修改的场景设定');
+  assert.equal(final.scenes[0].candidates.length,3);
+  assert.equal(final.scenes[0].selectedCandidateId,'second');
+  assert.equal(final.scenes[0].status,'idle');
+});
+
+test('stale scene generation recovers and readonly sample rejects scene generation', async () => {
+  const p = await sceneProject();
+  p.scenes[0].status = 'generating';
+  p.scenes[0].generationId = 'lost';
+  p.scenes[0].generationStartedAt = '2020-01-01T00:00:00.000Z';
+  db.projects.get(p.id).document = JSON.stringify(p);
+  const recovered = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.equal(recovered.scenes[0].status,'failed');
+  assert.equal(recovered.scenes[0].generationId,null);
+  assert.match(recovered.scenes[0].error,/重试/);
+  assert.equal((await handleApiRequest(request(`${samplePath}/generate-scene`,'POST',{sceneId:'any',count:1}),sceneEnv())).status,403);
+});
+
+test('scene candidates enforce ownership and reject over-limit generation', async () => {
+  const p = await sceneProject();
+  p.scenes[0].candidates = [{id:'unowned',url:'/api/assets/00000000-0000-0000-0000-000000000000',createdAt:'',prompt:'',batchId:'',source:'uploaded'}];
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env)).status,400);
+  p.scenes[0].candidates = Array.from({length:199},(_,i)=>({id:`c${i}`,url:'/samples/summer.png',createdAt:'',prompt:'',batchId:'',source:'sample'}));
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env)).status,200);
+  let called=false;
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-scene`,'POST',{sceneId:p.scenes[0].id,count:2}),sceneEnv(),{fetcher:async()=>{called=true;return sceneOutput();}})).status,400);
+  assert.equal(called,false);
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-scene`,'POST',{sceneId:p.scenes[0].id,count:1},'b@example.com'),sceneEnv())).status,404);
+});
+
+test('scene generation validates description and count and honors missing provider configuration', async () => {
+  const p = await sceneProject();
+  const url = `/api/projects/${p.id}/generate-scene`;
+  const noConfig = {...sceneEnv(),IMAGE_API_KEY:'',OPENAI_API_KEY:''};
+  assert.equal((await handleApiRequest(request(url,'POST',{sceneId:p.scenes[0].id,count:1}),noConfig)).status,503);
+  for (const count of [0,5,1.5,'1']) {
+    assert.equal((await handleApiRequest(request(url,'POST',{sceneId:p.scenes[0].id,count}),sceneEnv())).status,400);
+  }
+  p.scenes[0].description = '  ';
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
+  let called = false;
+  const result = await handleApiRequest(request(url,'POST',{sceneId:p.scenes[0].id,count:1}),sceneEnv(),{fetcher:async()=>{called=true;return sceneOutput();}});
+  assert.equal(result.status,400);
+  assert.match((await json(result)).error,/场景描述/);
+  assert.equal(called,false);
 });

@@ -1,4 +1,4 @@
-import type { Project, Shot } from './types.ts';
+import type { Project, Scene, Shot } from './types.ts';
 
 export type ImageBytes = { bytes: Uint8Array; mime: 'image/png' | 'image/jpeg' | 'image/webp' };
 export type ReferenceBytes = ImageBytes & { name: string };
@@ -16,6 +16,31 @@ export function detectImageMime(bytes: Uint8Array): ImageBytes['mime'] | null {
   return null;
 }
 
+function referencedScene(project: Project, shot: Shot): Scene | undefined {
+  if (!shot.sceneId) return undefined;
+  const scene = project.scenes?.find(s => s.id === shot.sceneId);
+  if (!scene) throw new Error('关联场景不存在，请重新选择。');
+  if (!scene.candidates.some(c => c.id === scene.selectedCandidateId)) throw new Error(`请先为场景「${scene.name}」选定一张参考图。`);
+  return scene;
+}
+
+export function shotReferenceUrls(project: Project, shot: Shot): string[] {
+  const urls = shot.characterIds.flatMap(id => project.characters.find(c => c.id === id)?.references.map(r => r.url) ?? []);
+  const scene = referencedScene(project, shot);
+  if (scene) urls.push(scene.candidates.find(c => c.id === scene.selectedCandidateId)!.url);
+  return urls;
+}
+
+export function buildScenePrompt(project: Project, scene: Scene): string {
+  if (!scene.description.trim()) throw new Error('请填写场景描述后再生成。');
+  return [
+    'Create one reusable environment reference image for a short drama. No people, characters, speech bubbles, subtitles, watermarks, or text.',
+    `Visual style: ${project.style || 'anime illustration'}.`,
+    `Location: ${scene.name}. Environment, layout, lighting and details: ${scene.description}.`,
+    `Compose a clear establishing view suitable for ${project.aspectRatio} framing, showing the spatial layout and distinctive landmarks for reuse across shots.`,
+  ].join('\n');
+}
+
 export function buildShotPrompt(project: Project, shot: Shot): string {
   let referenceIndex = 1;
   const characters = shot.characterIds.map(id => {
@@ -27,6 +52,7 @@ export function buildShotPrompt(project: Project, shot: Shot): string {
     const range = first === referenceIndex - 1 ? `reference image ${first}` : `reference images ${first}–${referenceIndex - 1}`;
     return `${character.name}: ${character.description} (${range})`;
   });
+  const scene = referencedScene(project, shot);
   return [
     characters.length
       ? 'Create one polished static frame for a short drama. Keep the people consistent with the provided character reference images. No speech bubbles, subtitles, watermarks, or text.'
@@ -34,7 +60,8 @@ export function buildShotPrompt(project: Project, shot: Shot): string {
     `Visual style: ${project.style || 'anime illustration'}.`,
     `Shot: ${shot.title}. Scene: ${shot.scene}. Action and composition: ${shot.description}.`,
     characters.length ? `Characters (reference images follow in the same order): ${characters.join('; ')}.` : 'No named characters.',
-  ].join('\n');
+    scene ? `Environment: ${scene.name} (reference image ${referenceIndex}). Setting: ${scene.description}. Use this image for the environment only; preserve its spatial layout, architecture and landmarks while adapting the camera and action to the shot.` : '',
+  ].filter(Boolean).join('\n');
 }
 
 export async function requestImageEdits(options: { key: string; model: string; baseUrl: string; prompt: string; count: number; aspectRatio: AspectRatio; images: ReferenceBytes[]; fetcher?: typeof fetch }): Promise<ImageBytes[]> {

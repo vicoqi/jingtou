@@ -16,7 +16,7 @@ try {
   const sample = (await request(samplePath)).project;
   assert.equal(sample.id,'sample-summer-letter');
   assert.deepEqual(await request('/api/projects'),before, 'browsing does not save a project');
-  for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST']]) {
+  for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST'],[`${samplePath}/generate-scene`,'POST']]) {
     const denied = await fetch(`${origin}${path}`,{method});
     assert.equal(denied.status,403,`${method} ${path}`);
   }
@@ -57,8 +57,30 @@ try {
   project.characters[0].references.push(uploaded.image);
   const persisted = await request(`/api/projects/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project }) });
   assert.equal(persisted.project.characters[0].references.length, 2);
+  project = persisted.project;
+  const sceneId = crypto.randomUUID();
+  const candidateId = crypto.randomUUID();
+  project.scenes = [{id:sceneId,name:'验收场景',description:'蓝色长椅与白色站棚',candidates:[{id:candidateId,url:uploaded.image.url,createdAt:new Date().toISOString(),prompt:'上传参考图',batchId:'verification',source:'uploaded'}],selectedCandidateId:candidateId,status:'idle',error:null,generationId:null,generationStartedAt:null}];
+  project.shots[0].sceneId = sceneId;
+  project.shots[1].sceneId = sceneId;
+  project = (await request(`/api/projects/${id}`, { method:'PUT', headers:{'content-type':'application/json'}, body:JSON.stringify({project}) })).project;
+  const sceneReload = (await request(`/api/projects/${id}`)).project;
+  assert.deepEqual(sceneReload.scenes,project.scenes);
+  assert.equal(sceneReload.shots[0].sceneId,sceneId);
+  assert.equal(sceneReload.shots[1].sceneId,sceneId);
+  const invalidGenerate = await fetch(`${origin}/api/projects/${id}/generate-scene`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sceneId,count:0})});
+  assert.equal(invalidGenerate.status,400,'reject invalid count before paid provider work');
+  const existingShots = project.shots;
+  project.scenes = [];
+  project.shots = project.shots.map(s=>s.sceneId===sceneId ? {...s,sceneId:null} : s);
+  await request(`/api/projects/${id}`, {method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project})});
+  const afterRemoval = (await request(`/api/projects/${id}`)).project;
+  assert.deepEqual(afterRemoval.scenes,[]);
+  assert.equal(afterRemoval.shots[0].sceneId,null);
+  assert.deepEqual(afterRemoval.shots.map(s=>s.candidates),existingShots.map(s=>s.candidates));
+  assert.deepEqual(afterRemoval.shots.map(s=>s.selectedCandidateId),existingShots.map(s=>s.selectedCandidateId));
   assert.deepEqual((await request(samplePath)).project,sample,'copy edits preserve the original sample');
-  console.log('HTTP smoke passed: readonly sample, explicit copy, rendered project URL, demo assets, 2 characters, 12 shots / 60s, reorder/edit/save/reload, preserved selection, revision conflict, uploaded reference persistence.');
+  console.log('HTTP smoke passed: readonly sample, explicit copy, project URL, demo assets, 2 characters, 12 shots / 60s, edit/save/reload, preserved selection, revision conflict, uploaded reference, scene selection persistence, multi-shot scene links, scene deletion without losing shot images. No paid generation requested.');
 } finally {
   if (id) await request(`/api/projects/${id}`, { method: 'DELETE' });
 }

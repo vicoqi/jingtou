@@ -1,8 +1,16 @@
-import type { Candidate, Project, ProjectSummary, Shot } from './types.ts';
+import type { Candidate, GenerationKind, Project, ProjectSummary, Scene, Shot } from './types.ts';
 import { newId } from './id.ts';
 
 export function newShot(): Shot {
-  return { id: newId(), title: '新镜头', characterIds: [], scene: '', description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+}
+
+export function newScene(): Scene {
+  return { id: newId(), name: '', description: '', candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+}
+
+export function removeScene(project: Project, id: string): Project {
+  return { ...project, scenes: (project.scenes ?? []).filter(s => s.id !== id), shots: project.shots.map(s => s.sceneId === id ? { ...s, sceneId: null } : s) };
 }
 
 export function getTimeline(shots: Shot[]): { shot: Shot; start: number; end: number }[] {
@@ -23,6 +31,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
 const isString = (value: unknown): value is string => typeof value === 'string';
 const internalImage = (url: unknown): url is string => isString(url) && (/^\/api\/assets\/[a-f0-9-]{36}$/.test(url) || /^\/samples\/(?:summer|linxia|chenyu)\.png$/.test(url));
 
+function validateCandidates(value: Record<string, unknown>): void {
+  if (!Array.isArray(value.candidates) || value.candidates.length > 200) throw new Error('Invalid candidates');
+  const ids = new Set<string>();
+  for (const c of value.candidates) {
+    if (!isRecord(c) || !isString(c.id) || !internalImage(c.url) || !isString(c.createdAt) || !isString(c.prompt) || !isString(c.batchId) || !['generated','uploaded','sample'].includes(String(c.source)) || ids.has(c.id)) throw new Error('Invalid candidate');
+    ids.add(c.id);
+  }
+  if (!(value.selectedCandidateId === null || (isString(value.selectedCandidateId) && ids.has(value.selectedCandidateId)))) throw new Error('Invalid selected candidate');
+}
+
 export function validateProject(value: unknown): asserts value is Project {
   if (!isRecord(value) || !isString(value.id) || !isString(value.name) || !isString(value.description) || !isString(value.style) || !['16:9','9:16'].includes(String(value.aspectRatio)) || !Array.isArray(value.characters) || !Array.isArray(value.shots) || !Number.isInteger(value.revision) || !isString(value.createdAt) || !isString(value.updatedAt)) throw new Error('Invalid project');
   if (value.name.trim().length < 1 || value.name.length > 120 || value.description.length > 5000 || value.style.length > 2000 || value.shots.length > 200 || value.characters.length > 100) throw new Error('Invalid project fields');
@@ -32,25 +50,30 @@ export function validateProject(value: unknown): asserts value is Project {
     characterIds.add(c.id);
     for (const ref of c.references) if (!isRecord(ref) || !isString(ref.id) || !isString(ref.name) || !internalImage(ref.url)) throw new Error('Invalid reference image');
   }
+  if (value.scenes !== undefined && (!Array.isArray(value.scenes) || value.scenes.length > 100)) throw new Error('Invalid scenes');
+  const sceneIds = new Set<string>();
+  for (const s of (value.scenes ?? []) as unknown[]) {
+    if (!isRecord(s) || !isString(s.id) || !isString(s.name) || !s.name.trim() || s.name.length > 120 || !isString(s.description) || s.description.length > 4000 || sceneIds.has(s.id) || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt))) throw new Error('Invalid scene');
+    sceneIds.add(s.id);
+    validateCandidates(s);
+  }
   const shotIds = new Set<string>();
   for (const s of value.shots) {
     if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
     shotIds.add(s.id);
     if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid shot duration');
     if (s.characterIds.some((id: unknown) => !isString(id) || !characterIds.has(id))) throw new Error('Invalid shot character');
-    const candidateIds = new Set<string>();
-    for (const c of s.candidates) {
-      if (!isRecord(c) || !isString(c.id) || !internalImage(c.url) || !isString(c.createdAt) || !isString(c.prompt) || !isString(c.batchId) || !['generated','uploaded','sample'].includes(String(c.source)) || candidateIds.has(c.id)) throw new Error('Invalid candidate');
-      candidateIds.add(c.id);
-    }
-    if (!(s.selectedCandidateId === null || (isString(s.selectedCandidateId) && candidateIds.has(s.selectedCandidateId)))) throw new Error('Invalid selected candidate');
+    if (s.sceneId !== undefined && s.sceneId !== null && (!isString(s.sceneId) || !sceneIds.has(s.sceneId))) throw new Error('Invalid shot scene');
+    validateCandidates(s);
   }
 }
 
-export function mergeGeneration(current: Project, shotId: string, generationId: string, candidates: Candidate[]): Project {
-  const shot = current.shots.find(s => s.id === shotId);
+export function mergeGeneration(current: Project, shotId: string, generationId: string, candidates: Candidate[], kind: GenerationKind = 'shots'): Project {
+  const items = current[kind] ?? [];
+  const shot = items.find(s => s.id === shotId);
   if (!shot || shot.generationId !== generationId || shot.status !== 'generating') throw new Error('Generation superseded');
-  return { ...current, shots: current.shots.map(s => s.id === shotId ? { ...s, candidates: [...s.candidates, ...candidates], status: 'idle' as const, error: null, generationId: null, generationStartedAt: null } : s) };
+  if (shot.candidates.length + candidates.length > 200) throw new Error('Too many candidates');
+  return { ...current, [kind]: items.map(s => s.id === shotId ? { ...s, candidates: [...s.candidates, ...candidates], status: 'idle' as const, error: null, generationId: null, generationStartedAt: null } : s) };
 }
 
 export function summarizeProject(project: Project): ProjectSummary {

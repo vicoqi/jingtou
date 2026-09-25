@@ -1,8 +1,8 @@
-import { buildShotPrompt, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
+import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
 import { mergeGeneration, summarizeProject, validateProject } from './domain.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
-import type { Candidate, Project, Shot } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
@@ -15,7 +15,7 @@ const json = (data: unknown, status = 200): Response => new Response(JSON.string
 function fail(status:number, message:string): never { throw new ApiError(status,message); }
 const uuidPath = /^\/api\/assets\/([a-f0-9-]{36})$/;
 const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
-const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate$/;
+const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
 const staleAfter = 10 * 60 * 1000;
 const schemaStatements = [
   'CREATE TABLE IF NOT EXISTS assets (id text PRIMARY KEY NOT NULL, owner text NOT NULL, mime text NOT NULL, name text NOT NULL)',
@@ -52,7 +52,10 @@ async function rowFor(env:ApiEnv,id:string,owner:string):Promise<ProjectRow> {
   if (!row || row.owner !== owner) fail(404,'Project not found');
   return row;
 }
-const readProject = (row:ProjectRow):Project => JSON.parse(row.document) as Project;
+const readProject = (row:ProjectRow):Project => {
+  const project = JSON.parse(row.document) as Project;
+  return { ...project, scenes: project.scenes ?? [] };
+};
 
 async function saveCas(env:ApiEnv,project:Project,owner:string,expectedRevision:number):Promise<Project | null> {
   const next = {...project, revision:expectedRevision+1, updatedAt:new Date().toISOString()};
@@ -62,12 +65,14 @@ async function saveCas(env:ApiEnv,project:Project,owner:string,expectedRevision:
 
 function recoverStale(project:Project):Project | null {
   let changed = false;
-  const shots = project.shots.map(s => {
+  const recover = <T extends GeneratedFrame>(s: T): T => {
     if (s.status !== 'generating' || !s.generationStartedAt || Date.now() - Date.parse(s.generationStartedAt) <= staleAfter) return s;
     changed = true;
     return {...s,status:'failed' as const,error:'生成已中断，请重试。',generationId:null,generationStartedAt:null};
-  });
-  return changed ? {...project, shots} : null;
+  };
+  const shots = project.shots.map(recover);
+  const scenes = (project.scenes ?? []).map(recover);
+  return changed ? {...project, shots, scenes} : null;
 }
 async function loadRecovered(env:ApiEnv,id:string,owner:string):Promise<Project> {
   for (let attempt=0;attempt<5;attempt++) {
@@ -84,6 +89,7 @@ async function validateOwnedAssets(env:ApiEnv,project:Project,owner:string):Prom
   const urls = new Set<string>();
   for (const c of project.characters) for (const r of c.references) urls.add(r.url);
   for (const s of project.shots) for (const c of s.candidates) urls.add(c.url);
+  for (const s of project.scenes ?? []) for (const c of s.candidates) urls.add(c.url);
   for (const url of urls) {
     const match=url.match(uuidPath);
     if (!match) continue;
@@ -103,7 +109,7 @@ async function getReference(env:ApiEnv,url:string,owner:string,requestUrl:string
     if (detectImageMime(bytes) !== asset.mime) fail(400,'Reference image file is invalid');
     return {bytes,mime:asset.mime as ReferenceBytes['mime'],name:asset.name};
   }
-  if (/^\/samples\/(?:linxia|chenyu)\.png$/.test(url) && env.ASSETS) {
+  if (/^\/samples\/(?:summer|linxia|chenyu)\.png$/.test(url) && env.ASSETS) {
     const response=await env.ASSETS.fetch(new Request(new URL(url,requestUrl)));
     if (!response.ok) fail(400,'Sample reference image is missing');
     const bytes=new Uint8Array(await response.arrayBuffer());
@@ -114,35 +120,42 @@ async function getReference(env:ApiEnv,url:string,owner:string,requestUrl:string
   fail(400,'Reference image must be an uploaded image');
 }
 
-async function generationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,candidates:Candidate[],error?:string):Promise<Project> {
+async function generationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,candidates:Candidate[],kind:GenerationKind,error?:string):Promise<Project> {
   for (let attempt=0;attempt<12;attempt++) {
     const current=readProject(await rowFor(env,id,owner));
-    const target=current.shots.find(s=>s.id===shotId);
+    const items=current[kind] ?? [];
+    const target=items.find(s=>s.id===shotId);
     if (!target || target.generationId!==generationId || target.status!=='generating') fail(409,'Generation was superseded');
-    const merged=error ? {...current,shots:current.shots.map(s=>s.id===shotId ? {...s,status:'failed' as const,error,generationId:null,generationStartedAt:null}:s)} : mergeGeneration(current,shotId,generationId,candidates);
+    const merged=error ? {...current,[kind]:items.map(s=>s.id===shotId ? {...s,status:'failed' as const,error,generationId:null,generationStartedAt:null}:s)} : mergeGeneration(current,shotId,generationId,candidates,kind);
     const saved=await saveCas(env,merged,owner,current.revision);
     if (saved) return saved;
   }
   fail(409,'Project changed repeatedly; reload and retry');
 }
 
-async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
+async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,kind:GenerationKind,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
   const body=await bodyJson(request);
   const count=body.count;
-  if (typeof body.shotId!=='string' || typeof count!=='number' || !Number.isInteger(count) || count<1 || count>4) fail(400,'Choose a shot and 1–4 images');
+  const targetId = kind === 'scenes' ? body.sceneId : body.shotId;
+  if (typeof targetId!=='string' || typeof count!=='number' || !Number.isInteger(count) || count<1 || count>4) fail(400,'请选择镜头或场景，并生成 1–4 张图片。');
   const key=env.IMAGE_API_KEY || env.OPENAI_API_KEY;
   const model=env.IMAGE_MODEL?.trim();
   if (!key || !model) fail(503,'请配置图片生成密钥和模型');
   const current=await loadRecovered(env,id,owner);
-  const shot=current.shots.find(s=>s.id===body.shotId);
-  if (!shot) fail(404,'Shot not found');
-  if (shot.status==='generating') fail(409,'Shot is already generating');
-  if (shot.candidates.length + count > 200) fail(400,'A shot can have at most 200 candidates');
-  const prompt=buildShotPrompt(current,shot);
-  const imageUrls=shot.characterIds.flatMap(cid=>current.characters.find(c=>c.id===cid)?.references.map(r=>r.url) || []);
+  const items = current[kind] ?? [];
+  const target = items.find(s=>s.id===targetId);
+  if (!target) fail(404,'镜头或场景不存在。');
+  if (target.status==='generating') fail(409,'正在生成，请稍候。');
+  if (target.candidates.length + count > 200) fail(400,'最多保留 200 张候选图。');
+  let prompt: string;
+  let imageUrls: string[];
+  try {
+    prompt = 'name' in target ? buildScenePrompt(current,target) : buildShotPrompt(current,target);
+    imageUrls = 'name' in target ? [] : shotReferenceUrls(current,target);
+  } catch (error) { fail(400,error instanceof Error ? error.message : '生成设定无效。'); }
   const images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner,request.url)));
   const generationId=crypto.randomUUID();
-  const started={...current,shots:current.shots.map(s=>s.id===shot.id ? {...s,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:s)};
+  const started={...current,[kind]:items.map(s=>s.id===target.id ? {...s,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:s)};
   const startedSaved=await saveCas(env,started,owner,current.revision);
   if (!startedSaved) fail(409,'Project changed; reload and retry');
   const generation = (async ():Promise<Project> => {
@@ -154,13 +167,13 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
     for (const result of output) {
       const assetId=crypto.randomUUID();
       await env.ASSETS_BUCKET.put(assetId,result.bytes,{httpMetadata:{contentType:result.mime}});
-      await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,result.mime,`${shot.title}.${result.mime.split('/')[1]}`).run();
+      await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,result.mime,`${'name' in target ? target.name : target.title}.${result.mime.split('/')[1]}`).run();
       candidates.push({id:crypto.randomUUID(),url:`/api/assets/${assetId}`,createdAt:now,prompt,batchId:generationId,source:'generated'});
     }
-      return await generationResult(env,owner,id,shot.id,generationId,candidates);
+      return await generationResult(env,owner,id,target.id,generationId,candidates,kind);
     } catch (error) {
       const message=error instanceof Error ? error.message : 'Image generation failed';
-      await generationResult(env,owner,id,shot.id,generationId,[],message).catch(()=>{});
+      await generationResult(env,owner,id,target.id,generationId,[],kind,message).catch(()=>{});
       throw error instanceof Error ? error : new Error(message);
     }
   })();
@@ -181,7 +194,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
-    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate`) {
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }
     if (path === `${samplePath}/copy` && request.method === 'POST') {
@@ -222,7 +235,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       return json({image:{id,url:`/api/assets/${id}`,name:file.name.slice(0,200)}},201);
     }
     const generateMatch=path.match(generationPath);
-    if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],options.fetcher,options.waitUntil);
+    if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],generateMatch[2]==='generate-scene'?'scenes':'shots',options.fetcher,options.waitUntil);
     const match=path.match(projectPath);
     if (match && request.method==='GET') return json({project:await loadRecovered(env,match[1],owner)});
     if (match && request.method==='PUT') {
@@ -232,11 +245,14 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       try { validateProject(proposed); } catch (error) { fail(400,error instanceof Error ? error.message : 'Invalid project'); }
       if (proposed.id!==match[1] || proposed.revision!==current.revision) fail(409,'Project changed; reload and retry');
       await validateOwnedAssets(env,proposed,owner);
-      const shotMap=new Map(current.shots.map(s=>[s.id,s]));
-      const safe:Project={...proposed,createdAt:current.createdAt,shots:proposed.shots.map((s:Shot)=>{
-        const old=shotMap.get(s.id);
-        return old?.status==='generating' ? {...s,status:old.status,error:old.error,generationId:old.generationId,generationStartedAt:old.generationStartedAt} : {...s,status:s.status==='generating'?'idle':s.status,generationId:null,generationStartedAt:null};
-      })};
+      const protectGeneration = <T extends GeneratedFrame>(items:T[], existing:T[]):T[] => {
+        const byId = new Map(existing.map(s=>[s.id,s]));
+        return items.map(s=>{
+          const old=byId.get(s.id);
+          return old?.status==='generating' ? {...s,status:old.status,error:old.error,generationId:old.generationId,generationStartedAt:old.generationStartedAt} : {...s,status:s.status==='generating'?'idle':s.status,generationId:null,generationStartedAt:null};
+        });
+      };
+      const safe:Project={...proposed,createdAt:current.createdAt,shots:protectGeneration(proposed.shots,current.shots),scenes:protectGeneration(proposed.scenes ?? [],current.scenes ?? [])};
       const saved=await saveCas(env,safe,owner,current.revision);
       if (!saved) fail(409,'Project changed; reload and retry');
       return json({project:saved});
