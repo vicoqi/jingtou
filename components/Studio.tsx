@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronRight, Clapperboard, Clock3, CloudCheck, Copy, Film, FolderOpen, House, ImagePlus, Images, LayoutGrid, List, LoaderCircle, LockKeyhole, Maximize2, Menu, MessageSquare, Mountain, Plus, RotateCcw, Settings2, Sparkles, Trash2, Upload, UsersRound, WandSparkles, X, Play, AlertCircle } from 'lucide-react';
 import type { Candidate, Project, Shot } from '../lib/types';
 import { newShot } from '../lib/domain';
-import { projectsLocation, projectSectionFromLocation, workspaceViewFromLocation, type ProjectSection } from '../lib/navigation';
+import { projectsLocation, resourceLibraryLocation, workspaceViewFromLocation, type ProjectSection } from '../lib/navigation';
 import { DEFAULT_PROJECT_STYLE, PROJECT_STYLE_PRESETS } from '../lib/project-defaults';
 import { formatTime, moveItem } from '../lib/playback';
 import { uploadImage } from '../lib/client';
@@ -12,6 +12,7 @@ import { newId } from '../lib/id';
 import { useStudio } from './useStudio';
 import { Characters } from './Characters';
 import { Scenes } from './Scenes';
+import { ResourceLibraries } from './ResourceLibraries';
 import { ShotSceneField } from './ShotSceneField';
 import { Modal } from './Modal';
 import { Preview } from './Preview';
@@ -70,23 +71,24 @@ export function Studio() {
   }
   function choose(candidate: Candidate) { patchShot({ selectedCandidateId: candidate.id }); }
   const goHome = () => { void studio.home(); setPage('shots'); setMobileNav(false); };
-  const openProject = (id: string) => { const target = page === 'characters' || page === 'scenes' ? page : 'shots'; void studio.open(id); setActiveId(''); setPage(target); setMobileNav(false); };
-  const goProjects = async (target: ProjectSection = 'shots') => {
+  const openProject = (id: string) => { void studio.open(id); setActiveId(''); setPage('shots'); setMobileNav(false); };
+  const openLibraryProject = (id: string, target: 'characters' | 'scenes') => { void studio.open(id); setActiveId(''); setPage(target); setMobileNav(false); };
+  const goProjects = async () => {
     if (project && !await studio.home()) return;
-    window.history.replaceState(window.history.state, '', projectsLocation(target));
-    setPage(target === 'shots' ? 'projects' : target); setMobileNav(false);
+    window.history.replaceState(window.history.state, '', projectsLocation());
+    setPage('projects'); setMobileNav(false);
   };
-  const openProjectSection = (target: ProjectSection) => {
-    if (project) { setPage(target); setMobileNav(false); }
-    else void goProjects(target);
+  const goResourceLibrary = async (target: 'characters' | 'scenes') => {
+    if (project && !await studio.home()) return;
+    window.history.replaceState(window.history.state, '', resourceLibraryLocation(target));
+    setPage(target); setMobileNav(false); void studio.refreshLibrary();
   };
   const openCreate = () => { setNewName(''); setNewStyle(DEFAULT_PROJECT_STYLE); setModal('create'); };
   const status = studio.saveState === '保存失败' ? 'error' : studio.saveState === '已保存' ? 'saved' : 'saving';
   useEffect(() => {
     const syncPage = () => {
-      if (workspaceViewFromLocation(window.location.href) !== 'projects') { setPage('shots'); return; }
-      const target = projectSectionFromLocation(window.location.href);
-      setPage(target === 'shots' ? 'projects' : target);
+      const view = workspaceViewFromLocation(window.location.href);
+      setPage(view === 'home' ? 'shots' : view);
     };
     syncPage(); window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
@@ -96,26 +98,26 @@ export function Studio() {
       <Link className="brand" href="/" aria-label="返回首页" onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); if (!disabled) goHome(); }}><span className="brand-symbol"><Clapperboard size={23} strokeWidth={1.8} /></span><span className="brand-name">镜头<span>JINGTOU STUDIO</span></span><span className="beta">BETA</span></Link>
       <div className="workspace-label">个人创作空间 <span>⌘</span></div>
       <button className={`nav-item ${!project && page === 'shots' ? 'active' : ''}`} disabled={disabled} onClick={goHome}><House size={18} />首页</button>
-      <button className={`nav-item ${page === 'projects' || (!!project && page === 'shots') ? 'active' : ''}`} disabled={disabled} onClick={() => void goProjects()}><Clapperboard size={18} />分镜工作台<span className="nav-dot" /></button>
-      <button className={`nav-item ${page === 'characters' ? 'active' : ''}`} disabled={uploading} onClick={() => openProjectSection('characters')}><UsersRound size={18} />角色库<span className="nav-count">{project?.characters.length || 0}</span></button>
-      <button className={`nav-item ${page === 'scenes' ? 'active' : ''}`} disabled={uploading} onClick={() => openProjectSection('scenes')}><Mountain size={18} />场景生成<span className="nav-count">{project?.scenes?.length || 0}</span></button>
+      <button className={`nav-item ${page === 'projects' || !!project ? 'active' : ''}`} disabled={disabled} onClick={() => void goProjects()}><Clapperboard size={18} />分镜工作台<span className="nav-dot" /></button>
+      <button className={`nav-item ${!project && page === 'characters' ? 'active' : ''}`} disabled={uploading} onClick={() => void goResourceLibrary('characters')}><UsersRound size={18} />角色库<span className="nav-count">{studio.library.characters.length}</span></button>
+      <button className={`nav-item ${!project && page === 'scenes' ? 'active' : ''}`} disabled={uploading} onClick={() => void goResourceLibrary('scenes')}><Mountain size={18} />场景生成<span className="nav-count">{studio.library.scenes.length}</span></button>
       <div className="sidebar-divider" />
       <button className="new-project-button" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button>
       <div className="sidebar-bottom"><div className="studio-tip"><span className="tip-spark">✦</span><strong>每一个好故事<br />都始于一个镜头。</strong><span>让想象，成为画面。</span></div><button className="nav-item settings-link" onClick={() => setModal('settings')}><Settings2 size={17} />生图服务设置<span className={`connection-dot ${studio.config.configured ? 'connected' : ''}`} /></button><div className="user-profile"><div className="avatar">创</div><div><strong>独立创作者</strong><span>个人工作空间</span></div><span className="version">V 0.1</span></div></div>
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="收起导航" onClick={() => setMobileNav(false)} />}
     <main className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><button disabled={disabled} onClick={goHome} aria-label="返回首页">首页</button><ChevronRight size={14} /><button disabled={!project || editingDisabled} onClick={() => setModal('project')}>{!project && page !== 'shots' ? '分镜工作台' : project?.name || '创作工作台'}{project && <ChevronDown size={13} />}</button></div><div className="topbar-actions"><span role="status" className={`save-status ${status}`}>{readOnly ? <LockKeyhole size={15} /> : status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{readOnly ? '只读样例' : studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><button disabled={disabled} onClick={goHome} aria-label="返回首页">首页</button><ChevronRight size={14} /><button disabled={!project || editingDisabled} onClick={() => setModal('project')}>{project?.name || (page === 'projects' ? '分镜工作台' : page === 'characters' ? '角色库' : page === 'scenes' ? '场景生成' : '创作工作台')}{project && <ChevronDown size={13} />}</button></div><div className="topbar-actions"><span role="status" className={`save-status ${status}`}>{readOnly ? <LockKeyhole size={15} /> : status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{readOnly ? '只读样例' : studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></div></header>
       {studio.error && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>{studio.error}</span>{studio.saveState === '保存失败' && <button onClick={() => void studio.flush().catch(() => {})}>重试保存</button>}<button onClick={() => setModal('reload')}>重新加载</button><button className="icon-button" aria-label="关闭提示" onClick={() => studio.setError('')}><X size={15} /></button></div>}
       {readOnly && !studio.loading && <div className="sample-banner"><LockKeyhole size={18} /><div><strong>样例作品 · 只读浏览</strong><p>可查看角色、分镜与成片预览；复制后可编辑并保存到我的作品。</p></div><button className="button primary compact" disabled={disabled} onClick={() => void studio.copySample()}>{busy ? <LoaderCircle size={15} className="spin" /> : <Copy size={15} />}复制为我的作品</button></div>}
       {project && !studio.loading && <nav className="workspace-toolbar project-navigation" aria-label="作品编辑"><div className="workspace-tabs"><button className={page !== 'characters' && page !== 'scenes' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('shots')}><Clapperboard size={16} />分镜台<span>{project.shots.length}</span></button><button className={page === 'characters' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('characters')}><UsersRound size={16} />角色设定<span>{project.characters.length}</span></button><button className={page === 'scenes' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('scenes')}><Mountain size={16} />场景生成<span>{project.scenes?.length ?? 0}</span></button></div></nav>}
-      {studio.loading ? <div className="loading-state"><LoaderCircle size={30} className="spin" /><h2>正在打开创作空间</h2><p>你的故事，即将续写。</p></div> : !project && page !== 'shots' ? <section className="project-library" aria-labelledby="project-library-title">
-        <div className="project-library-heading"><div><span className="eyebrow">STORYBOARD WORKSPACE</span><h1 id="project-library-title">我的作品</h1><p>{studio.projects.length ? page === 'characters' ? '选择一个作品，进入它的角色库' : page === 'scenes' ? '选择一个作品，进入它的场景生成' : `共 ${studio.projects.length} 个作品，选择一个继续创作` : '创建第一个作品，开始编排你的故事'}</p></div><button className="button primary" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button></div>
+      {studio.loading ? <div className="loading-state"><LoaderCircle size={30} className="spin" /><h2>正在打开创作空间</h2><p>你的故事，即将续写。</p></div> : !project && page === 'projects' ? <section className="project-library" aria-labelledby="project-library-title">
+        <div className="project-library-heading"><div><span className="eyebrow">STORYBOARD WORKSPACE</span><h1 id="project-library-title">我的作品</h1><p>{studio.projects.length ? `共 ${studio.projects.length} 个作品，选择一个继续创作` : '创建第一个作品，开始编排你的故事'}</p></div><button className="button primary" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button></div>
         {studio.projects.length ? <div className="project-library-grid">{studio.projects.map(p => <button key={p.id} className="project-library-card" disabled={disabled} onClick={() => openProject(p.id)} aria-label={`打开作品：${p.name}`}>
           <span className="project-library-cover">{p.cover ? <img src={p.cover} alt="" loading="lazy" /> : <Film size={30} strokeWidth={1.25} />}<span>{formatTime(p.duration)}</span></span>
           <span className="project-library-info"><strong>{p.name}</strong><small>{p.shotCount} 个镜头 · {p.selectedCount}/{p.shotCount} 已选画面</small><em>{updatedLabel(p.updatedAt)}<ArrowRight size={14} /></em></span>
         </button>)}</div> : <button className="project-library-empty" disabled={disabled} onClick={openCreate}><span><Plus size={22} /></span><strong>创建第一个作品</strong><small>角色、分镜和候选画面会保存在这里</small></button>}
-      </section> : !project ? <section className="welcome">
+      </section> : !project && (page === 'characters' || page === 'scenes') ? <ResourceLibraries section={page} library={studio.library} loading={studio.libraryLoading} onOpen={openLibraryProject} onCreate={openCreate} /> : !project ? <section className="welcome">
         <div className="welcome-copy"><span className="eyebrow">A STORY IN EVERY FRAME</span><h1>让故事，<br /><em>一帧帧发生。</em></h1><p>从一个角色、一段对白开始。<br />把脑海中的故事，变成属于你的动漫短剧。</p><div className="row"><button className="button primary large" disabled={disabled} onClick={openCreate}><Plus size={18} />开始我的作品</button><button className="button large" disabled={disabled} onClick={() => void studio.openSample()}>{busy ? <LoaderCircle className="spin" size={17} /> : <Play size={17} />}浏览样例</button></div><div className="welcome-steps"><span>01 设定角色</span><span>02 编排分镜</span><span>03 让画面发生</span></div></div><div className="welcome-art"><img src="/samples/summer.png" alt="夏日海边车站中相遇的两位动漫角色" /><span className="art-corner top-left" /><span className="art-corner bottom-right" /><div className="welcome-art-caption"><span>夏日来信</span><span>原创示例画面 · 16:9</span></div></div>
       </section> : page === 'scenes' ? <Scenes key={project.id} project={project} update={update} busy={disabled} readOnly={readOnly} onUploadingChange={setUploading} onGenerate={(id, n) => { if (studio.config.configured) void studio.generateScene(id, n); else setModal('settings'); }} /> : page === 'characters' ? <Characters key={project.id} project={project} update={update} busy={editingDisabled} /> : <>
         <div className="workbench-heading"><div><div className="eyebrow">STORYBOARD WORKSPACE</div><div className="row heading-title"><h1>{project.name.replace(' · 样例', '')}</h1><span className="tag">{project.aspectRatio}</span>{readOnly && <span className="tag sample-tag">只读样例</span>}</div><p>{project.description || '把故事拆成镜头，让每一帧都有自己的表达。'}</p></div><div className="project-stats"><span><strong>{pad(project.shots.length)}</strong>个分镜</span><span><strong>{formatTime(total)}</strong>总时长</span><span className="completion-stat"><strong>{selectedCount}<i> / {project.shots.length}</i></strong>已选画面</span></div></div>

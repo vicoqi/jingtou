@@ -201,6 +201,44 @@ test('new projects persist the requested visual style', async () => {
   assert.equal((await handleApiRequest(request('/api/projects','POST',{name:'Blank style',style:'   '}),env)).status,400);
 });
 
+test('global resource library aggregates every owned project without leaking foreign resources', async () => {
+  const owner = 'library@example.com';
+  const first = (await json(await handleApiRequest(request('/api/projects','POST',{name:'海边故事'},owner),env))).project;
+  first.characters = [{id:'hero',name:'林夏',description:'蓝色短发',references:[{id:'hero-ref',name:'正面',url:'/samples/linxia.png'}]}];
+  first.scenes = [{...newScene('水彩绘本'),id:'station',name:'海边车站',description:'蓝色长椅',candidates:[
+    {id:'old',url:'/samples/summer.png',createdAt:'',prompt:'',batchId:'',source:'sample'},
+    {id:'selected',url:'/samples/chenyu.png',createdAt:'',prompt:'',batchId:'',source:'sample'},
+  ],selectedCandidateId:'selected'}];
+  first.shots = [{...newShot(),id:'arrival',characterIds:['hero'],sceneId:'station'}];
+  assert.equal((await handleApiRequest(request(`/api/projects/${first.id}`,'PUT',{project:first},owner),env)).status,200);
+
+  const second = (await json(await handleApiRequest(request('/api/projects','POST',{name:'城市故事'},owner),env))).project;
+  second.characters = [{id:'friend',name:'陈屿',description:'棕色短发',references:[]}];
+  assert.equal((await handleApiRequest(request(`/api/projects/${second.id}`,'PUT',{project:second},owner),env)).status,200);
+
+  const foreign = (await json(await handleApiRequest(request('/api/projects','POST',{name:'别人的作品'},'foreign-library@example.com'),env))).project;
+  foreign.characters = [{id:'foreign',name:'不可见角色',description:'',references:[]}];
+  assert.equal((await handleApiRequest(request(`/api/projects/${foreign.id}`,'PUT',{project:foreign},'foreign-library@example.com'),env)).status,200);
+
+  const response = await handleApiRequest(request('/api/library','GET',undefined,owner),env);
+  assert.equal(response.status,200);
+  const library = await json(response);
+  assert.equal(library.characters.length,2);
+  assert.deepEqual(library.characters.find((item:any)=>item.name==='林夏'),{
+    id:'hero',name:'林夏',description:'蓝色短发',references:[{id:'hero-ref',name:'正面',url:'/samples/linxia.png'}],
+    projectId:first.id,projectName:'海边故事',shotCount:1,
+  });
+  assert.deepEqual(library.characters.find((item:any)=>item.name==='陈屿'),{
+    id:'friend',name:'陈屿',description:'棕色短发',references:[],
+    projectId:second.id,projectName:'城市故事',shotCount:0,
+  });
+  assert.deepEqual(library.scenes.map((item:any)=>({name:item.name,project:item.projectName,shots:item.shotCount,candidates:item.candidateCount,preview:item.previewUrl,style:item.style})),[
+    {name:'海边车站',project:'海边故事',shots:1,candidates:2,preview:'/samples/chenyu.png',style:'水彩绘本'},
+  ]);
+  assert.equal('candidates' in library.scenes[0],false);
+  assert.ok(!library.characters.some((item:any)=>item.name==='不可见角色'));
+});
+
 test('invalid project documents return a client error', async () => {
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'Validation'}),env))).project;
   p.shots.push({id:'bad',title:'Bad',characterIds:[],scene:'',description:'',dialogue:'',duration:0,candidates:[],selectedCandidateId:null,status:'idle',error:null,generationId:null,generationStartedAt:null});

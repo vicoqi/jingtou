@@ -1,4 +1,4 @@
-import type { Project, ProjectSummary, ReferenceImage } from './types';
+import type { Project, ProjectSummary, ReferenceImage, ResourceLibrary } from './types';
 
 export class ApiError extends Error {
   status: number;
@@ -13,6 +13,7 @@ export async function api<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const listProjects = () => api<{ projects: ProjectSummary[] }>('/api/projects');
+export const getResourceLibrary = () => api<ResourceLibrary>('/api/library');
 export const getProject = (id: string) => api<{ project: Project }>(`/api/projects/${id}`);
 export const saveProject = (project: Project) => api<{ project: Project }>(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ project }) });
 export async function uploadImage(file: File) {

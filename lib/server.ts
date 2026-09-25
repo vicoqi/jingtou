@@ -2,7 +2,7 @@ import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, 
 import { mergeGeneration, summarizeProject, validateProject } from './domain.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
-import type { Candidate, GeneratedFrame, GenerationKind, Project } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ResourceLibrary } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
@@ -205,6 +205,32 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (path==='/api/projects' && request.method==='GET') {
       const rows=(await env.DB.prepare('SELECT id, owner, revision, document, updated_at FROM projects WHERE owner = ? ORDER BY updated_at DESC').bind(owner).all<ProjectRow>()).results;
       return json({projects:rows.map(row=>summarizeProject(readProject(row)))});
+    }
+    if (path==='/api/library' && request.method==='GET') {
+      const rows=(await env.DB.prepare('SELECT id, owner, revision, document, updated_at FROM projects WHERE owner = ? ORDER BY updated_at DESC').bind(owner).all<ProjectRow>()).results;
+      const library:ResourceLibrary={characters:[],scenes:[]};
+      for (const row of rows) {
+        const project=readProject(row);
+        library.characters.push(...project.characters.map(character=>({
+          ...character,
+          projectId:project.id,
+          projectName:project.name,
+          shotCount:project.shots.filter(shot=>shot.characterIds.includes(character.id)).length,
+        })));
+        library.scenes.push(...(project.scenes ?? []).map(scene=>({
+          id:scene.id,
+          name:scene.name,
+          description:scene.description,
+          style:scene.style,
+          status:scene.status,
+          projectId:project.id,
+          projectName:project.name,
+          shotCount:project.shots.filter(shot=>shot.sceneId===scene.id).length,
+          candidateCount:scene.candidates.length,
+          previewUrl:scene.candidates.find(candidate=>candidate.id===scene.selectedCandidateId)?.url ?? scene.candidates.at(-1)?.url ?? null,
+        })));
+      }
+      return json(library);
     }
     if (path==='/api/projects' && request.method==='POST') {
       const body=await bodyJson(request);

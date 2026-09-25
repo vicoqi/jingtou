@@ -1,5 +1,6 @@
 export type HistoryMode = 'push' | 'replace' | 'none';
 export type ProjectSection = 'shots' | 'characters' | 'scenes';
+export type WorkspaceView = 'home' | 'projects' | 'characters' | 'scenes';
 
 export function projectIdFromLocation(href: string): string | null {
   return new URL(href).searchParams.get('project')?.trim() || null;
@@ -9,17 +10,17 @@ export function projectLocation(id: string | null): string {
   return id ? `/?project=${encodeURIComponent(id)}` : '/';
 }
 
-export function workspaceViewFromLocation(href: string): 'home' | 'projects' {
-  return new URL(href).searchParams.get('view') === 'projects' ? 'projects' : 'home';
+export function workspaceViewFromLocation(href: string): WorkspaceView {
+  const view = new URL(href).searchParams.get('view');
+  return view === 'projects' || view === 'characters' || view === 'scenes' ? view : 'home';
 }
 
-export function projectSectionFromLocation(href: string): ProjectSection {
-  const target = new URL(href).searchParams.get('target');
-  return target === 'characters' || target === 'scenes' ? target : 'shots';
+export function projectsLocation(): string {
+  return '/?view=projects';
 }
 
-export function projectsLocation(target: ProjectSection = 'shots'): string {
-  return target === 'shots' ? '/?view=projects' : `/?view=projects&target=${target}`;
+export function resourceLibraryLocation(section: Exclude<ProjectSection, 'shots'>): string {
+  return `/?view=${section}`;
 }
 
 export function createProjectNavigation<T extends { id: string }>(ports: {

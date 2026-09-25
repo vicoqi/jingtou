@@ -68,6 +68,14 @@ try {
   assert.deepEqual(sceneReload.scenes,project.scenes);
   assert.equal(sceneReload.shots[0].sceneId,sceneId);
   assert.equal(sceneReload.shots[1].sceneId,sceneId);
+  const library = await request('/api/library');
+  assert.equal(library.characters.filter(character=>character.projectId===id).length,project.characters.length);
+  const libraryScene = library.scenes.find(scene=>scene.projectId===id && scene.id===sceneId);
+  assert.equal(libraryScene.projectName,project.name);
+  assert.equal(libraryScene.shotCount,2);
+  assert.equal(libraryScene.candidateCount,1);
+  assert.equal(libraryScene.previewUrl,uploaded.image.url);
+  assert.equal('candidates' in libraryScene,false);
   const invalidGenerate = await fetch(`${origin}/api/projects/${id}/generate-scene`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sceneId,count:0})});
   assert.equal(invalidGenerate.status,400,'reject invalid count before paid provider work');
   const existingShots = project.shots;
@@ -80,7 +88,7 @@ try {
   assert.deepEqual(afterRemoval.shots.map(s=>s.candidates),existingShots.map(s=>s.candidates));
   assert.deepEqual(afterRemoval.shots.map(s=>s.selectedCandidateId),existingShots.map(s=>s.selectedCandidateId));
   assert.deepEqual((await request(samplePath)).project,sample,'copy edits preserve the original sample');
-  console.log('HTTP smoke passed: readonly sample, explicit copy, project URL, demo assets, 2 characters, 12 shots / 60s, edit/save/reload, preserved selection, revision conflict, uploaded reference, scene selection persistence, multi-shot scene links, scene deletion without losing shot images. No paid generation requested.');
+  console.log('HTTP smoke passed: readonly sample, explicit copy, project URL, demo assets, 2 characters, 12 shots / 60s, edit/save/reload, preserved selection, revision conflict, uploaded reference, global character/scene libraries, scene selection persistence, multi-shot scene links, scene deletion without losing shot images. No paid generation requested.');
 } finally {
   if (id) await request(`/api/projects/${id}`, { method: 'DELETE' });
 }

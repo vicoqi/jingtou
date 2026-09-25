@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GenerationKind, Project, ProjectSummary } from '../lib/types';
-import { api, getProject, listProjects, saveProject } from '../lib/client';
+import type { GenerationKind, Project, ProjectSummary, ResourceLibrary } from '../lib/types';
+import { api, getProject, getResourceLibrary, listProjects, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
@@ -10,6 +10,8 @@ export function useStudio() {
   const [project, setProject] = useState<Project | null>(null);
   const current = useRef<Project | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [library, setLibrary] = useState<ResourceLibrary>({ characters: [], scenes: [] });
+  const [libraryLoading, setLibraryLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [navigating, setNavigating] = useState(false);
@@ -20,8 +22,21 @@ export function useStudio() {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pending = useRef<Promise<void> | null>(null);
   const alive = useRef(true);
+  const libraryRequest = useRef(0);
   const replace = useCallback((p: Project | null) => { current.current = p; setProject(p); }, []);
   const refreshList = useCallback(async () => { const result = await listProjects(); if (alive.current) setProjects(result.projects); }, []);
+  const refreshLibrary = useCallback(async () => {
+    const request = ++libraryRequest.current;
+    setLibraryLoading(true);
+    try {
+      const result = await getResourceLibrary();
+      if (alive.current && request === libraryRequest.current) setLibrary(result);
+    } catch (e) {
+      if (alive.current && request === libraryRequest.current) setError((e as Error).message);
+    } finally {
+      if (alive.current && request === libraryRequest.current) setLibraryLoading(false);
+    }
+  }, []);
   const flush = useCallback(async function flushSave(): Promise<void> {
     clearTimeout(timer.current);
     if (pending.current) { await pending.current; if (dirty.current) await flushSave(); return; }
@@ -38,6 +53,7 @@ export function useStudio() {
         }
         setSaveState(dirty.current ? '等待保存…' : '已保存'); setError('');
         setProjects(items => items.map(item => item.id === saved.id ? summarizeProject(saved) : item));
+        void refreshLibrary();
       } catch (e) {
         dirty.current = true; setSaveState('保存失败'); setError((e as Error).message); throw e;
       }
@@ -45,7 +61,7 @@ export function useStudio() {
     pending.current = work;
     try { await work; } finally { pending.current = null; }
     if (dirty.current) await flushSave();
-  }, [replace]);
+  }, [replace, refreshLibrary]);
   const update = useCallback((fn: (p: Project) => Project) => {
     if (!current.current || isReadOnlyProject(current.current)) return;
     replace(fn(current.current)); dirty.current = true; setSaveState('等待保存…');
@@ -69,11 +85,11 @@ export function useStudio() {
     let active = true;
     alive.current = true;
     const initialVersion = navigation.version;
-    Promise.all([listProjects(), api<{ configured: boolean; model: string }>('/api/config')]).then(async ([list, settings]) => {
+    Promise.all([listProjects(), api<{ configured: boolean; model: string }>('/api/config'), getResourceLibrary()]).then(async ([list, settings, resources]) => {
       if (!active) return;
-      setProjects(list.projects); setConfig(settings);
+      setProjects(list.projects); setConfig(settings); setLibrary(resources); setLibraryLoading(false);
       if (navigation.version === initialVersion) await navigation.navigate(projectIdFromLocation(window.location.href), 'none');
-    }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); });
+    }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) { setLoading(false); setLibraryLoading(false); } });
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty.current || pending.current) { event.preventDefault(); event.returnValue = ''; } };
     const popState = () => { void navigation.navigate(projectIdFromLocation(window.location.href), 'none'); };
     window.addEventListener('beforeunload', beforeUnload);
@@ -105,7 +121,7 @@ export function useStudio() {
       await flush();
       const result = await api<{ project: Project }>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
       if (navigation.version === version) { replace(result.project); setSaveState('已保存'); writeLocation(result.project.id, 'push'); }
-      await refreshList(); return true;
+      await refreshList(); void refreshLibrary(); return true;
     }
     catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
@@ -127,7 +143,7 @@ export function useStudio() {
       const target = kind === 'scenes' ? { sceneId: shotId } : { shotId };
       const result = await api<{ project: Project }>(`/api/projects/${id}/${endpoint}`, { method: 'POST', body: JSON.stringify({ ...target, count }) });
       if (current.current?.id === id && navigation.version === version) replace(result.project);
-      await refreshList();
+      await refreshList(); void refreshLibrary();
     } catch (e) {
       const message = (e as Error).message;
       try {
@@ -146,7 +162,7 @@ export function useStudio() {
     try {
       await flush(); await api(`/api/projects/${id}`, { method: 'DELETE' });
       if (current.current?.id === id) { await navigation.navigate(null, 'replace'); dirty.current = false; setSaveState('已保存'); }
-      await refreshList();
+      await refreshList(); void refreshLibrary();
     }
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
@@ -162,5 +178,5 @@ export function useStudio() {
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
-  return { project, projects, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, flush, reload };
+  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, flush, reload, refreshLibrary };
 }

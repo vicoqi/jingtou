@@ -7,3 +7,6 @@ export type Scene = GeneratedFrame & { name: string; description: string; style?
 export type Shot = GeneratedFrame & { title: string; characterIds: string[]; scene: string; sceneId?: string | null; description: string; dialogue: string; duration: number };
 export type Project = { id: string; name: string; description: string; aspectRatio: '16:9' | '9:16'; style: string; characters: Character[]; scenes?: Scene[]; shots: Shot[]; revision: number; createdAt: string; updatedAt: string };
 export type ProjectSummary = { id: string; name: string; description: string; updatedAt: string; shotCount: number; selectedCount: number; duration: number; cover: string | null };
+export type LibraryCharacter = Character & { projectId: string; projectName: string; shotCount: number };
+export type LibraryScene = Pick<Scene, 'id' | 'name' | 'description' | 'style' | 'status'> & { projectId: string; projectName: string; shotCount: number; candidateCount: number; previewUrl: string | null };
+export type ResourceLibrary = { characters: LibraryCharacter[]; scenes: LibraryScene[] };
