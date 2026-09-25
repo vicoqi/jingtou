@@ -8,6 +8,14 @@ export function projectLocation(id: string | null): string {
   return id ? `/?project=${encodeURIComponent(id)}` : '/';
 }
 
+export function workspaceViewFromLocation(href: string): 'home' | 'projects' {
+  return new URL(href).searchParams.get('view') === 'projects' ? 'projects' : 'home';
+}
+
+export function projectsLocation(): string {
+  return '/?view=projects';
+}
+
 export function createProjectNavigation<T extends { id: string }>(ports: {
   current: () => T | null;
   save: () => Promise<void>;

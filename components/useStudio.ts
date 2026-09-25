@@ -94,7 +94,9 @@ export function useStudio() {
     if (await navigation.navigate(id)) await refreshList().catch(e => setError(e.message));
   }
   async function home() {
-    if (await navigation.navigate(null)) await refreshList().catch(e => setError(e.message));
+    const opened = await navigation.navigate(null);
+    if (opened) await refreshList().catch(e => setError(e.message));
+    return opened;
   }
   async function createAndOpen(path: string, body?: { name: string; style?: string }) {
     setWorking(true); setError('');

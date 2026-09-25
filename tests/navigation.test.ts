@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createProjectNavigation, projectLocation, projectIdFromLocation } from '../lib/navigation.ts';
+import { createProjectNavigation, projectLocation, projectIdFromLocation, projectsLocation, workspaceViewFromLocation } from '../lib/navigation.ts';
 
 test('the home URL never implicitly opens a saved project', () => {
   assert.equal(projectIdFromLocation('http://localhost:3000/'), null);
@@ -12,6 +12,13 @@ test('project URLs round trip and can be reopened directly', () => {
   const id = 'f62c9014-6627-4fc7-924c-741e9ad73481';
   assert.equal(projectLocation(id), `/?project=${id}`);
   assert.equal(projectIdFromLocation(`http://localhost:3000${projectLocation(id)}`), id);
+});
+
+test('the storyboard workspace has a distinct, restorable URL', () => {
+  assert.equal(projectsLocation(), '/?view=projects');
+  assert.equal(workspaceViewFromLocation('http://localhost:3000/'), 'home');
+  assert.equal(workspaceViewFromLocation('http://localhost:3000/?view=projects'), 'projects');
+  assert.equal(workspaceViewFromLocation('http://localhost:3000/?view=unknown'), 'home');
 });
 
 function fixture(save: () => Promise<void> = async () => {}) {
