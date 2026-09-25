@@ -5,6 +5,7 @@ import type { Candidate, Project, Scene } from '../lib/types';
 import { newScene, removeScene } from '../lib/domain';
 import { newId } from '../lib/id';
 import { uploadImage } from '../lib/client';
+import { PROJECT_STYLE_PRESETS } from '../lib/project-defaults';
 import { Modal } from './Modal';
 
 type Props = {
@@ -17,6 +18,7 @@ type Props = {
 };
 const selectedImage = (scene: Scene) => scene.candidates.find(c => c.id === scene.selectedCandidateId);
 const statusLabel = (scene: Scene) => scene.status === 'generating' ? '生成中' : scene.status === 'failed' ? '生成失败' : selectedImage(scene) ? '已选参考图' : scene.candidates.length ? '待选参考图' : '待生成';
+const presetValue = (style: string) => PROJECT_STYLE_PRESETS.some(preset => preset.value === style) ? style : '';
 
 export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadingChange }: Props) {
   const scenes = project.scenes ?? [];
@@ -33,7 +35,7 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
   const zoom = scene?.candidates.find(c => c.id === zoomId);
   const disabled = busy || uploading || readOnly;
   const atLimit = scenes.length >= 100;
-  function create() { if (disabled || atLimit) return; setError(''); setEditing(newScene()); }
+  function create() { if (disabled || atLimit) return; setError(''); setEditing(newScene(project.style)); }
   function patch(patch: Partial<Scene>) {
     if (!scene || disabled) return;
     update(p => ({ ...p, scenes: (p.scenes ?? []).map(s => s.id === scene.id ? { ...s, ...patch } : s) }));
@@ -42,7 +44,7 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
     if (disabled || !editing?.name.trim()) return;
     const name = editing.name.trim();
     update(p => ({ ...p, scenes: (p.scenes ?? []).some(s => s.id === editing.id)
-      ? p.scenes!.map(s => s.id === editing.id ? { ...s, name, description: editing.description } : s)
+      ? p.scenes!.map(s => s.id === editing.id ? { ...s, name, description: editing.description, style: editing.style ?? project.style } : s)
       : [...(p.scenes ?? []), { ...editing, name }] }));
     setActiveId(editing.id); setEditing(null); setError('');
   }
@@ -73,7 +75,7 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
             {selected ? <><img src={selected.url} alt={`${scene.name}选定参考图`} /><span className="selected-overlay"><Check size={12} />分镜参考图</span><button className="scene-zoom icon-button" aria-label="放大场景参考图" onClick={() => setZoomId(selected.id)}><Maximize2 size={17} /></button></> : <div className="empty-frame"><Mountain size={36} strokeWidth={1.2} /><h3>{scene.candidates.length ? '选择一张场景参考图' : '这个场景，等待你的描述'}</h3><p>{scene.candidates.length ? '点击下方「选用」，供关联分镜生成时参考' : '生成候选图，或上传已有的环境画面'}</p></div>}
             {scene.status === 'generating' && <div className="generating-overlay" role="status"><LoaderCircle className="spin" size={28} /><strong>正在生成场景候选图</strong><span>已有画面和选择会保留</span></div>}
           </div>
-          <div className="scene-settings"><fieldset className="shot-form" disabled={disabled}><label>场景描述<textarea rows={6} maxLength={4000} value={scene.description} onChange={e => patch({ description: e.target.value })} placeholder="例如：海边车站，白色站棚、蓝色长椅，铁轨沿海岸延伸，夕阳从左侧照入。描述布局、建筑、光线和标志性物件…" /></label><label>候选数量<select value={count} onChange={e => setCount(Number(e.target.value))}>{[1,2,3,4].map(n => <option key={n} value={n}>{n} 张</option>)}</select></label></fieldset><p className="scene-style">沿用作品画风：{project.style}</p><button className="button primary" disabled={disabled || !scene.description.trim() || scene.candidates.length + count > 200} onClick={() => onGenerate(scene.id,count)}>{scene.status === 'generating' ? <LoaderCircle className="spin" size={16} /> : scene.candidates.length || scene.status === 'failed' ? <RotateCcw size={16} /> : <Sparkles size={16} />}{scene.status === 'generating' ? '生成中，请稍候' : scene.status === 'failed' ? '重试生成场景' : scene.candidates.length ? '重新生成场景' : '生成场景图'}</button><p className="scene-hint">生成纯环境参考图，人物在分镜中加入。</p></div>
+          <div className="scene-settings"><fieldset className="shot-form" disabled={disabled}><label>场景描述<textarea rows={6} maxLength={4000} value={scene.description} onChange={e => patch({ description: e.target.value })} placeholder="例如：海边车站，白色站棚、蓝色长椅，铁轨沿海岸延伸，夕阳从左侧照入。描述布局、建筑、光线和标志性物件…" /></label><label>风格预设<select value={presetValue(scene.style ?? project.style)} onChange={e => patch({ style: e.target.value })}><option value="">自定义</option>{PROJECT_STYLE_PRESETS.map(preset => <option key={preset.label} value={preset.value}>{preset.label}</option>)}</select></label><label>风格描述<input maxLength={500} value={scene.style ?? project.style} onChange={e => patch({ style: e.target.value })} placeholder="可在选择预设后继续修改" /></label><label>候选数量<select value={count} onChange={e => setCount(Number(e.target.value))}>{[1,2,3,4].map(n => <option key={n} value={n}>{n} 张</option>)}</select></label></fieldset><button className="button primary" disabled={disabled || !scene.description.trim() || scene.candidates.length + count > 200} onClick={() => onGenerate(scene.id,count)}>{scene.status === 'generating' ? <LoaderCircle className="spin" size={16} /> : scene.candidates.length || scene.status === 'failed' ? <RotateCcw size={16} /> : <Sparkles size={16} />}{scene.status === 'generating' ? '生成中，请稍候' : scene.status === 'failed' ? '重试生成场景' : scene.candidates.length ? '重新生成场景' : '生成场景图'}</button><p className="scene-hint">场景风格仅影响当前场景。生成纯环境参考图，人物在分镜中加入。</p></div>
         </div>
         {scene.error && <div className="notice error" role="alert"><AlertCircle size={16} /><span>{scene.error}</span></div>}
         <div className="candidate-heading"><div><h3>场景候选图 <span>{scene.candidates.length}</span></h3><p>选定一张后，在分镜的「关联场景」中使用</p></div><button className="text-button" disabled={disabled} onClick={() => uploadRef.current?.click()}>{uploading ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}上传场景图</button><input ref={uploadRef} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" multiple disabled={disabled} onChange={e => void upload(e)} /></div>
@@ -81,7 +83,7 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
         <div className="notice scene-note"><Mountain size={16} /><span>更新场景设定或参考图后，关联分镜的后续生成会使用新设定。已有分镜画面和选图会保留。</span></div>
       </div>
     </div>}
-    {editing && <Modal title={scenes.some(s => s.id === editing.id) ? '编辑场景' : '创建场景'} onClose={() => setEditing(null)}><form className="modal-form" onSubmit={e => { e.preventDefault(); save(); }}><label>场景名称<input autoFocus required maxLength={120} value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} placeholder="例如：海边车站 · 黄昏" /></label><label>场景描述<textarea rows={5} maxLength={4000} value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} placeholder="描述地点、空间布局、建筑、光线和标志性物件…" /></label><p className="muted small">保存后可生成候选图，或上传已有场景图。</p><div className="modal-actions"><button type="button" className="button" onClick={() => setEditing(null)}>取消</button><button className="button primary" disabled={disabled || !editing.name.trim()}>保存场景</button></div></form></Modal>}
+    {editing && <Modal title={scenes.some(s => s.id === editing.id) ? '编辑场景' : '创建场景'} onClose={() => setEditing(null)}><form className="modal-form" onSubmit={e => { e.preventDefault(); save(); }}><label>场景名称<input autoFocus required maxLength={120} value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} placeholder="例如：海边车站 · 黄昏" /></label><label>场景描述<textarea rows={5} maxLength={4000} value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} placeholder="描述地点、空间布局、建筑、光线和标志性物件…" /></label><label>风格预设<select value={presetValue(editing.style ?? project.style)} onChange={e => setEditing({ ...editing, style: e.target.value })}><option value="">自定义</option>{PROJECT_STYLE_PRESETS.map(preset => <option key={preset.label} value={preset.value}>{preset.label}</option>)}</select></label><label>风格描述<input maxLength={500} value={editing.style ?? project.style} onChange={e => setEditing({ ...editing, style: e.target.value })} placeholder="可在选择预设后继续修改" /></label><p className="muted small">新场景默认使用作品画风，可在这里单独设置。保存后可生成候选图，或上传已有场景图。</p><div className="modal-actions"><button type="button" className="button" onClick={() => setEditing(null)}>取消</button><button className="button primary" disabled={disabled || !editing.name.trim()}>保存场景</button></div></form></Modal>}
     {deleting && <Modal title="删除场景" onClose={() => setDeleting(null)}><p className="modal-copy">确定删除「{deleting.name}」？{project.shots.filter(s => s.sceneId === deleting.id).length} 个分镜的场景关联将解除，已有分镜画面和选图会保留。</p><div className="modal-actions"><button className="button" onClick={() => setDeleting(null)}>取消</button><button className="button danger" disabled={disabled} onClick={() => { update(p => removeScene(p,deleting.id)); setDeleting(null); }}>删除场景</button></div></Modal>}
     {zoom && scene && <Modal title={`${scene.name} · 场景候选图`} wide onClose={() => setZoomId(null)}><div className="lightbox-image"><img src={zoom.url} alt={`${scene.name}场景大图`} /></div><div className="lightbox-controls"><button className="button" disabled={scene.candidates.length < 2} onClick={() => setZoomId(scene.candidates[(scene.candidates.findIndex(c => c.id === zoom.id) - 1 + scene.candidates.length) % scene.candidates.length].id)}>上一张</button><span className="muted">{scene.candidates.findIndex(c => c.id === zoom.id)+1} / {scene.candidates.length}</span><button className="button" disabled={scene.candidates.length < 2} onClick={() => setZoomId(scene.candidates[(scene.candidates.findIndex(c => c.id === zoom.id)+1) % scene.candidates.length].id)}>下一张</button><button className="button primary" disabled={disabled} onClick={() => { patch({ selectedCandidateId: zoom.id }); setZoomId(null); }}><Check size={16} />{scene.selectedCandidateId === zoom.id ? '已选为场景参考图' : '选为场景参考图'}</button></div></Modal>}
   </section>;

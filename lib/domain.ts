@@ -5,8 +5,8 @@ export function newShot(): Shot {
   return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
-export function newScene(): Scene {
-  return { id: newId(), name: '', description: '', candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+export function newScene(style = ''): Scene {
+  return { id: newId(), name: '', description: '', style, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function removeScene(project: Project, id: string): Project {
@@ -53,7 +53,7 @@ export function validateProject(value: unknown): asserts value is Project {
   if (value.scenes !== undefined && (!Array.isArray(value.scenes) || value.scenes.length > 100)) throw new Error('Invalid scenes');
   const sceneIds = new Set<string>();
   for (const s of (value.scenes ?? []) as unknown[]) {
-    if (!isRecord(s) || !isString(s.id) || !isString(s.name) || !s.name.trim() || s.name.length > 120 || !isString(s.description) || s.description.length > 4000 || sceneIds.has(s.id) || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt))) throw new Error('Invalid scene');
+    if (!isRecord(s) || !isString(s.id) || !isString(s.name) || !s.name.trim() || s.name.length > 120 || !isString(s.description) || s.description.length > 4000 || !(s.style === undefined || (isString(s.style) && s.style.length <= 2000)) || sceneIds.has(s.id) || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt))) throw new Error('Invalid scene');
     sceneIds.add(s.id);
     validateCandidates(s);
   }

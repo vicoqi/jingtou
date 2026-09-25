@@ -35,7 +35,7 @@ export function buildScenePrompt(project: Project, scene: Scene): string {
   if (!scene.description.trim()) throw new Error('请填写场景描述后再生成。');
   return [
     'Create one reusable environment reference image for a short drama. No people, characters, speech bubbles, subtitles, watermarks, or text.',
-    `Visual style: ${project.style || 'anime illustration'}.`,
+    `Visual style: ${scene.style?.trim() || project.style || 'anime illustration'}.`,
     `Location: ${scene.name}. Environment, layout, lighting and details: ${scene.description}.`,
     `Compose a clear establishing view suitable for ${project.aspectRatio} framing, showing the spatial layout and distinctive landmarks for reuse across shots.`,
   ].join('\n');

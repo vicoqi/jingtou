@@ -15,12 +15,18 @@ test('scene documents validate and legacy projects without scenes remain valid',
   assert.throws(() => domain.validateProject({ ...p, scenes: [scene(), scene()] }), /scene/i);
   assert.throws(() => domain.validateProject({ ...p, scenes: [{ ...scene(), selectedCandidateId: 'missing' }] }), /selected/i);
   assert.throws(() => domain.validateProject({ ...p, scenes: [{ ...scene(), candidates: [{ ...candidate('old'), url: 'https://foreign.example/image.png' }] }] }), /candidate/i);
+  assert.throws(() => domain.validateProject({ ...p, scenes: [{ ...scene(), style: 42 }] }), /scene/i);
+  assert.throws(() => domain.validateProject({ ...p, scenes: [{ ...scene(), style: 'x'.repeat(2001) }] }), /scene/i);
   assert.throws(() => domain.validateProject({ ...p, scenes: [] }), /scene/i);
   const legacy = createProject('Legacy');
   delete legacy.scenes;
   legacy.shots.push(domain.newShot());
   delete legacy.shots[0].sceneId;
   assert.doesNotThrow(() => domain.validateProject(legacy));
+});
+
+test('new scenes can start with the project style', () => {
+  assert.equal(domain.newScene('水彩绘本').style, '水彩绘本');
 });
 
 test('deleting a scene removes links but preserves shot text, candidates and selection', () => {
@@ -44,13 +50,20 @@ test('scene generation merges history without replacing selection or other shots
   assert.throws(() => domain.mergeGeneration(p, 'station', 'superseded', [], 'scenes'), /superseded/i);
 });
 
-test('scene generation uses project style and asks for an unoccupied environment', () => {
+test('scene generation falls back to project style and asks for an unoccupied environment', () => {
   const p = createProject('Scene', false, '电影写实摄影');
   const prompt = generation.buildScenePrompt(p, scene());
   assert.match(prompt, /电影写实摄影/);
   assert.match(prompt, /蓝色长椅/);
   assert.match(prompt, /no people/i);
   assert.doesNotMatch(prompt, /anime|animated/i);
+});
+
+test('scene generation prefers the scene style over the project style', () => {
+  const p = createProject('Scene', false, '国风动漫');
+  const prompt = generation.buildScenePrompt(p, { ...scene(), style: '真人电影写实摄影' });
+  assert.match(prompt, /真人电影写实摄影/);
+  assert.doesNotMatch(prompt, /国风动漫/);
 });
 
 test('shot prompt and references put scene after all character images and use current settings', () => {
