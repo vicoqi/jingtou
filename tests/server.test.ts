@@ -48,6 +48,79 @@ test('API initializes missing tables and index idempotently', async () => {
   assert.equal(db.schema.size,3);
 });
 
+const samplePath = '/api/projects/sample-summer-letter';
+
+test('browsing the canonical sample is stable and does not create saved projects', async () => {
+  const before = db.projects.size;
+  const response = await handleApiRequest(request(samplePath),env);
+  assert.equal(response.status,200);
+  const sample = (await json(response)).project;
+  assert.equal(sample.id,'sample-summer-letter');
+  assert.equal(sample.characters.length,2);
+  assert.equal(sample.shots.length,12);
+  assert.equal(sample.shots.reduce((total:number,s:any)=>total+s.duration,0),60);
+  const other = await handleApiRequest(request(samplePath,'GET',undefined,'b@example.com'),env);
+  assert.equal(other.status,200);
+  assert.deepEqual((await json(other)).project,sample);
+  assert.equal(db.projects.size,before);
+  const list = (await json(await handleApiRequest(request('/api/projects'),env))).projects;
+  assert.ok(!list.some((p:any)=>p.id===sample.id));
+});
+
+test('sample rejects saving, deletion and generation without touching data or provider', async () => {
+  const before = structuredClone([...db.projects]);
+  const assetsBefore = db.assets.size;
+  let called = false;
+  const options = {fetcher:async()=>{called=true;throw new Error('sample must not generate');}};
+  for (const owner of ['a@example.com','b@example.com']) {
+    for (const [method,path,body] of [
+      ['PUT',samplePath,{project:{id:'sample-summer-letter',name:'Overwrite',readOnly:false}}],
+      ['DELETE',samplePath,undefined],
+      ['POST',`${samplePath}/generate`,{shotId:'sample-shot-1',count:1}],
+    ] as const) {
+      const response = await handleApiRequest(request(path,method,body,owner),env,options);
+      assert.equal(response.status,403,`${method} ${path}`);
+      assert.match((await json(response)).error,/只读.*复制/);
+    }
+  }
+  assert.equal(called,false);
+  assert.equal(db.assets.size,assetsBefore);
+  assert.deepEqual([...db.projects],before);
+});
+
+test('explicit sample copies are editable and owner scoped while the original stays unchanged', async () => {
+  const sample = (await json(await handleApiRequest(request(samplePath),env))).project;
+  const response = await handleApiRequest(request(`${samplePath}/copy`,'POST'),env);
+  assert.equal(response.status,201);
+  const copy = (await json(response)).project;
+  const other = (await json(await handleApiRequest(request(`${samplePath}/copy`,'POST',undefined,'b@example.com'),env))).project;
+  assert.notEqual(copy.id,sample.id);
+  assert.notEqual(copy.id,other.id);
+  assert.equal(copy.name,'夏日来信 · 我的副本');
+  assert.deepEqual(copy.characters,sample.characters);
+  const withoutDates = (p:any) => p.shots.map((s:any)=>({...s,candidates:s.candidates.map(({createdAt,...c}:any)=>{ void createdAt; return c; })}));
+  assert.deepEqual(withoutDates(copy),withoutDates(sample));
+  copy.name = '我的改编';
+  copy.characters[0].description = '新的角色设定';
+  copy.shots[0].dialogue = '只修改我的副本';
+  copy.shots[0].selectedCandidateId = copy.shots[0].candidates[1].id;
+  const saved = await handleApiRequest(request(`/api/projects/${copy.id}`,'PUT',{project:copy}),env);
+  assert.equal(saved.status,200);
+  const reloaded = (await json(await handleApiRequest(request(`/api/projects/${copy.id}`),env))).project;
+  assert.equal(reloaded.name,copy.name);
+  assert.deepEqual(reloaded.characters,copy.characters);
+  assert.deepEqual(reloaded.shots,copy.shots);
+  for (const method of ['GET','PUT','DELETE']) {
+    const denied = await handleApiRequest(request(`/api/projects/${copy.id}`,method,method==='PUT'?{project:reloaded}:undefined,'b@example.com'),env);
+    assert.equal(denied.status,404);
+  }
+  assert.deepEqual((await json(await handleApiRequest(request(`/api/projects/${other.id}`,'GET',undefined,'b@example.com'),env))).project,other);
+  assert.equal((await handleApiRequest(request(`/api/projects/${copy.id}`,'DELETE'),env)).status,200);
+  assert.deepEqual((await json(await handleApiRequest(request(samplePath),env))).project,sample);
+  const anonymous = new Request(`https://studio.example${samplePath}/copy`,{method:'POST'});
+  assert.equal((await handleApiRequest(anonymous,env)).status,401);
+});
+
 test('generation configuration requires both a key and an explicit model', async () => {
   const before=(await json(await handleApiRequest(request('/api/config'),env)));
   assert.equal(before.configured,false);
@@ -80,16 +153,16 @@ test('sample generation reads the two shipped character references', async () =>
   const png=new Uint8Array([137,80,78,71,13,10,26,10,0]);
   const requested:string[]=[];
   env.ASSETS={fetch:async (assetRequest:Request)=>{
-    requested.push(new URL(assetRequest.url).pathname);
+    requested.push(assetRequest.url);
     return new Response(png,{headers:{'content-type':'image/png'}});
   }};
   const sample=(await json(await handleApiRequest(request('/api/projects','POST',{name:'Sample',demo:true}),env))).project;
   const response=await handleApiRequest(request(`/api/projects/${sample.id}/generate`,'POST',{shotId:sample.shots[0].id,count:1}),env,{fetcher:async (_url,init)=>{
-    assert.equal((init?.body as FormData).getAll('image[]').length,2);
+    assert.equal((init?.body as FormData).getAll('image').length,2);
     return new Response(JSON.stringify({data:[{b64_json:btoa(String.fromCharCode(...png))}]}));
   }});
   assert.equal(response.status,200);
-  assert.deepEqual(requested,['/samples/linxia.png','/samples/chenyu.png']);
+  assert.deepEqual(requested,['https://studio.example/samples/linxia.png','https://studio.example/samples/chenyu.png']);
   env.OPENAI_API_KEY='';
   delete env.ASSETS;
 });
@@ -229,4 +302,42 @@ test('a shot without associated characters uses text-only generation', async () 
   }});
   assert.equal(response.status,200);
   env.OPENAI_API_KEY='';
+});
+
+test('explicit LAN mode shares the existing local workspace and keeps samples readonly', async () => {
+  const localEnv = {...env,JINGTOU_LOCAL_WORKSPACE:'1'};
+  const createLocal = new Request('http://localhost:3000/api/projects', {
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'LAN shared project'}),
+  });
+  const created = (await json(await handleApiRequest(createLocal,env))).project;
+  const url = `http://192.168.1.112:3000/api/projects/${created.id}`;
+  const response = await handleApiRequest(new Request(url),localEnv);
+  assert.equal(response.status,200);
+  const project = (await json(response)).project;
+  assert.deepEqual(project,created);
+  project.name = 'Edited from LAN';
+  const saved = await handleApiRequest(new Request(url,{
+    method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project}),
+  }),localEnv);
+  assert.equal(saved.status,200);
+  const local = await handleApiRequest(new Request(`http://localhost:3000/api/projects/${created.id}`),env);
+  assert.equal((await json(local)).project.name,'Edited from LAN');
+  // A forwarded identity cannot switch workspaces when sharing is explicitly enabled.
+  const list = await handleApiRequest(new Request('http://192.168.1.112:3000/api/projects',{
+    headers:{'oai-authenticated-user-email':'someone@example.com'},
+  }),localEnv);
+  assert.ok((await json(list)).projects.some((p:any)=>p.id===created.id));
+  assert.equal((await handleApiRequest(new Request(`http://192.168.1.112:3000${samplePath}`),localEnv)).status,200);
+  assert.equal((await handleApiRequest(new Request(`http://192.168.1.112:3000${samplePath}`,{method:'DELETE'}),localEnv)).status,403);
+  assert.equal((await handleApiRequest(request(`/api/projects/${created.id}`),env)).status,404);
+  assert.equal((await handleApiRequest(new Request(url,{method:'DELETE'}),localEnv)).status,200);
+});
+
+test('private addresses and client flags do not bypass identity checks outside LAN mode', async () => {
+  for (const origin of ['http://192.168.1.112:3000','http://10.0.0.2:3000','https://studio.example']) {
+    const response = await handleApiRequest(new Request(`${origin}/api/projects?JINGTOU_LOCAL_WORKSPACE=1`,{
+      headers:{'JINGTOU_LOCAL_WORKSPACE':'1','x-forwarded-host':'localhost'},
+    }),env);
+    assert.equal(response.status,401,origin);
+  }
 });

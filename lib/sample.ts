@@ -1,9 +1,17 @@
 import { newShot } from './domain.ts';
+import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import type { Project } from './types.ts';
 
 export function createProject(name: string, demo = false): Project {
-  const now = new Date().toISOString();
-  const project: Project = { id: crypto.randomUUID(), name: name.trim(), description: '', aspectRatio: '16:9', style: '国风动漫，电影感光影', characters: [], shots: [], revision: 1, createdAt: now, updatedAt: now };
+  return buildProject(name, demo, crypto.randomUUID(), new Date().toISOString());
+}
+
+export function createSamplePreview(): Project {
+  return buildProject('夏日来信 · 样例', true, SAMPLE_PROJECT_ID, '2026-09-24T00:00:00.000Z');
+}
+
+function buildProject(name: string, demo: boolean, id: string, now: string): Project {
+  const project: Project = { id, name: name.trim(), description: '', aspectRatio: '16:9', style: '国风动漫，电影感光影', characters: [], shots: [], revision: 1, createdAt: now, updatedAt: now };
   if (!demo) return project;
   project.name = '夏日来信 · 样例';
   project.description = '三张示例素材编排为十二个分镜，共六十秒，用于体验流程。';

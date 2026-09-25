@@ -1,7 +1,8 @@
 import type { Candidate, Project, ProjectSummary, Shot } from './types.ts';
+import { newId } from './id.ts';
 
 export function newShot(): Shot {
-  return { id: crypto.randomUUID(), title: '新镜头', characterIds: [], scene: '', description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function getTimeline(shots: Shot[]): { shot: Shot; start: number; end: number }[] {

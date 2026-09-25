@@ -4,6 +4,7 @@ import type { Project, ProjectSummary } from '../lib/types';
 import { api, getProject, listProjects, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
+import { isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
 
 export function useStudio() {
   const [project, setProject] = useState<Project | null>(null);
@@ -26,6 +27,7 @@ export function useStudio() {
     if (pending.current) { await pending.current; if (dirty.current) await flushSave(); return; }
     const snapshot = current.current;
     if (!dirty.current || !snapshot) return;
+    if (isReadOnlyProject(snapshot)) { dirty.current = false; return; }
     dirty.current = false; setSaveState('保存中…');
     const work = (async () => {
       try {
@@ -45,7 +47,7 @@ export function useStudio() {
     if (dirty.current) await flushSave();
   }, [replace]);
   const update = useCallback((fn: (p: Project) => Project) => {
-    if (!current.current) return;
+    if (!current.current || isReadOnlyProject(current.current)) return;
     replace(fn(current.current)); dirty.current = true; setSaveState('等待保存…');
     clearTimeout(timer.current); timer.current = setTimeout(() => { void flush().catch(() => {}); }, 600);
   }, [replace, flush]);
@@ -94,19 +96,24 @@ export function useStudio() {
   async function home() {
     if (await navigation.navigate(null)) await refreshList().catch(e => setError(e.message));
   }
-  async function create(name: string, demo = false) {
+  async function createAndOpen(path: string, body?: { name: string }) {
     setWorking(true); setError('');
     const version = navigation.version;
     try {
       await flush();
-      const result = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name, demo }) });
-      if (navigation.version === version) { replace(result.project); writeLocation(result.project.id, 'push'); }
+      const result = await api<{ project: Project }>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
+      if (navigation.version === version) { replace(result.project); setSaveState('已保存'); writeLocation(result.project.id, 'push'); }
       await refreshList(); return true;
     }
     catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
+  const create = (name: string) => createAndOpen('/api/projects', { name });
+  const openSample = () => open(SAMPLE_PROJECT_ID);
+  const copySample = () => isReadOnlyProject(current.current)
+    ? createAndOpen(`/api/projects/${SAMPLE_PROJECT_ID}/copy`)
+    : Promise.resolve(false);
   async function generate(shotId: string, count: number) {
-    if (!current.current) return;
+    if (!current.current || isReadOnlyProject(current.current)) return;
     setWorking(true); setError('');
     const id = current.current.id;
     const version = navigation.version;
@@ -129,7 +136,7 @@ export function useStudio() {
     } finally { setWorking(false); }
   }
   async function remove() {
-    if (!current.current) return;
+    if (!current.current || isReadOnlyProject(current.current)) return;
     setWorking(true);
     const id = current.current.id;
     try {
@@ -150,5 +157,5 @@ export function useStudio() {
     }
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
-  return { project, projects, loading, busy: working || navigating || generating, saveState, error, setError, config, update, open, home, create, generate, remove, flush, reload };
+  return { project, projects, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, remove, flush, reload };
 }

@@ -1,12 +1,13 @@
 import { buildShotPrompt, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
 import { mergeGeneration, summarizeProject, validateProject } from './domain.ts';
-import { createProject } from './sample.ts';
+import { createProject, createSamplePreview } from './sample.ts';
+import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import type { Candidate, Project, Shot } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
 type Bucket = { put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null> };
-export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string };
+export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string; JINGTOU_LOCAL_WORKSPACE?:string };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
 type AssetRow = { id:string; owner:string; mime:string; name:string };
 class ApiError extends Error { status:number; constructor(status:number, message:string) { super(message); this.status=status; } }
@@ -26,7 +27,9 @@ async function ensureSchema(env: ApiEnv): Promise<void> {
   for (const sql of schemaStatements) await env.DB.prepare(sql).bind().run();
 }
 
-function ownerOf(request:Request): string {
+function ownerOf(request:Request,env:ApiEnv): string {
+  // Only dev:lan injects this binding. Never trust a request header for LAN mode.
+  if (env.JINGTOU_LOCAL_WORKSPACE === '1') return 'local-development';
   const hostname = new URL(request.url).hostname;
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') return 'local-development';
   const email = request.headers.get('oai-authenticated-user-email')?.trim().toLowerCase();
@@ -89,7 +92,7 @@ async function validateOwnedAssets(env:ApiEnv,project:Project,owner:string):Prom
   }
 }
 
-async function getReference(env:ApiEnv,url:string,owner:string):Promise<ReferenceBytes> {
+async function getReference(env:ApiEnv,url:string,owner:string,requestUrl:string):Promise<ReferenceBytes> {
   const match=url.match(uuidPath);
   if (match) {
     const asset=await env.DB.prepare('SELECT id, owner, mime, name FROM assets WHERE id = ? AND owner = ?').bind(match[1],owner).first<AssetRow>();
@@ -101,7 +104,7 @@ async function getReference(env:ApiEnv,url:string,owner:string):Promise<Referenc
     return {bytes,mime:asset.mime as ReferenceBytes['mime'],name:asset.name};
   }
   if (/^\/samples\/(?:linxia|chenyu)\.png$/.test(url) && env.ASSETS) {
-    const response=await env.ASSETS.fetch(new Request(`https://assets.local${url}`));
+    const response=await env.ASSETS.fetch(new Request(new URL(url,requestUrl)));
     if (!response.ok) fail(400,'Sample reference image is missing');
     const bytes=new Uint8Array(await response.arrayBuffer());
     const mime=detectImageMime(bytes);
@@ -137,13 +140,13 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   if (shot.candidates.length + count > 200) fail(400,'A shot can have at most 200 candidates');
   const prompt=buildShotPrompt(current,shot);
   const imageUrls=shot.characterIds.flatMap(cid=>current.characters.find(c=>c.id===cid)?.references.map(r=>r.url) || []);
-  const images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner)));
+  const images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner,request.url)));
   const generationId=crypto.randomUUID();
   const started={...current,shots:current.shots.map(s=>s.id===shot.id ? {...s,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:s)};
   const startedSaved=await saveCas(env,started,owner,current.revision);
   if (!startedSaved) fail(409,'Project changed; reload and retry');
   try {
-    const providerOptions={key,model,baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',prompt,count,fetcher};
+    const providerOptions={key,model,baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',prompt,count,aspectRatio:current.aspectRatio,fetcher};
     const output=images.length ? await requestImageEdits({...providerOptions,images}) : await requestImageGeneration(providerOptions);
     const now=new Date().toISOString();
     const candidates:Candidate[]=[];
@@ -163,10 +166,20 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
 
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch}={}):Promise<Response> {
   try {
-    const owner=ownerOf(request);
+    const owner=ownerOf(request,env);
     const path=new URL(request.url).pathname;
     await ensureSchema(env);
     if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
+    const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
+    if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate`) {
+      fail(403,'样例为只读，请先复制为我的作品。');
+    }
+    if (path === `${samplePath}/copy` && request.method === 'POST') {
+      const project = {...createProject('夏日来信',true),name:'夏日来信 · 我的副本'};
+      await env.DB.prepare('INSERT INTO projects (id, owner, revision, document, updated_at) VALUES (?, ?, ?, ?, ?)').bind(project.id,owner,project.revision,JSON.stringify(project),project.updatedAt).run();
+      return json({project},201);
+    }
     if (path==='/api/projects' && request.method==='GET') {
       const rows=(await env.DB.prepare('SELECT id, owner, revision, document, updated_at FROM projects WHERE owner = ? ORDER BY updated_at DESC').bind(owner).all<ProjectRow>()).results;
       return json({projects:rows.map(row=>summarizeProject(readProject(row)))});

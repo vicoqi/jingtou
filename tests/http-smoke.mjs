@@ -11,8 +11,21 @@ try {
   const page = await fetch(origin);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /镜头/);
-  const created = await request('/api/projects', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'HTTP 验收测试', demo: true }) });
+  const samplePath = '/api/projects/sample-summer-letter';
+  const before = await request('/api/projects');
+  const sample = (await request(samplePath)).project;
+  assert.equal(sample.id,'sample-summer-letter');
+  assert.deepEqual(await request('/api/projects'),before, 'browsing does not save a project');
+  for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST']]) {
+    const denied = await fetch(`${origin}${path}`,{method});
+    assert.equal(denied.status,403,`${method} ${path}`);
+  }
+  const created = await request(`${samplePath}/copy`, { method: 'POST' });
   let project = created.project; id = project.id;
+  assert.notEqual(id,sample.id);
+  assert.equal(project.name,'夏日来信 · 我的副本');
+  assert.ok((await request('/api/projects')).projects.some(p=>p.id===id));
+  assert.equal((await fetch(`${origin}/?project=${id}`)).status,200);
   assert.equal(project.characters.length, 2);
   assert.equal(project.shots.length, 12);
   assert.equal(project.shots.reduce((n, s) => n + s.duration, 0), 60);
@@ -23,6 +36,7 @@ try {
   }
   const oldSelection = project.shots[0].selectedCandidateId;
   const originalRevision = project.revision;
+  project.name = 'HTTP 验收测试';
   project.characters[0].description = '验收修改角色，旧画面应保留';
   project.shots[0].duration = 8;
   project.shots[0].dialogue = '新的对白应进入预览';
@@ -30,6 +44,7 @@ try {
   project = (await request(`/api/projects/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project }) })).project;
   assert.ok(project.revision > originalRevision);
   const reloaded = (await request(`/api/projects/${id}`)).project;
+  assert.equal(reloaded.name,'HTTP 验收测试');
   assert.equal(reloaded.shots[11].dialogue, '新的对白应进入预览');
   assert.equal(reloaded.shots[11].selectedCandidateId, oldSelection);
   assert.equal(reloaded.shots.reduce((n, s) => n + s.duration, 0), 63);
@@ -42,7 +57,8 @@ try {
   project.characters[0].references.push(uploaded.image);
   const persisted = await request(`/api/projects/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project }) });
   assert.equal(persisted.project.characters[0].references.length, 2);
-  console.log('HTTP smoke passed: rendered page, demo assets, 2 characters, 12 shots / 60s, reorder/edit/save/reload, preserved selection, revision conflict, uploaded reference persistence.');
+  assert.deepEqual((await request(samplePath)).project,sample,'copy edits preserve the original sample');
+  console.log('HTTP smoke passed: readonly sample, explicit copy, rendered project URL, demo assets, 2 characters, 12 shots / 60s, reorder/edit/save/reload, preserved selection, revision conflict, uploaded reference persistence.');
 } finally {
   if (id) await request(`/api/projects/${id}`, { method: 'DELETE' });
 }

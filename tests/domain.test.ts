@@ -21,6 +21,22 @@ test('new shot starts empty at five seconds', () => {
   assert.equal(result.selectedCandidateId, null);
 });
 
+test('creating shots works on LAN HTTP where crypto.randomUUID is unavailable', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis,'crypto')!;
+  const getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+  Object.defineProperty(globalThis,'crypto',{configurable:true,value:{getRandomValues}});
+  try {
+    assert.doesNotThrow(()=>{
+      const first = newShot();
+      const second = newShot();
+      assert.match(first.id,/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+      assert.notEqual(first.id,second.id);
+    });
+  } finally {
+    Object.defineProperty(globalThis,'crypto',original);
+  }
+});
+
 test('validation rejects invalid duration and malformed reference URLs', () => {
   assert.throws(() => validateProject(project([shot('x', 0)])), /duration/i);
   const p = project([shot('x')]);

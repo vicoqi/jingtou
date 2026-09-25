@@ -14,6 +14,7 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  assets: { binding: "ASSETS" },
   d1_databases: d1
     ? [
         {
@@ -33,7 +34,8 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ command }) => {
+  const shareLocalWorkspace = command === 'serve' && process.env.JINGTOU_LAN === '1';
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -52,7 +54,11 @@ export default defineConfig(async () => {
       sites(),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-        config: localBindingConfig,
+        config: {
+          ...localBindingConfig,
+          // Exclude the shared development identity from production builds.
+          vars: shareLocalWorkspace ? { JINGTOU_LOCAL_WORKSPACE: '1' } : {},
+        },
       }),
     ],
   };
