@@ -172,10 +172,10 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const path=new URL(request.url).pathname;
     await ensureSchema(env);
     if (path.startsWith('/api/auth/')) return await handleAuth(request,env);
-    const owner=(await requireUser(request,env)).id;
-    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
+    const owner=(await requireUser(request,env)).id;
+    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
     if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }

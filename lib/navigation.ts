@@ -1,3 +1,5 @@
+import { SAMPLE_PROJECT_ID } from './project-access.ts';
+
 export type HistoryMode = 'push' | 'replace' | 'none';
 export type ProjectSection = 'shots' | 'characters' | 'scenes';
 export type WorkspaceView = 'home' | 'projects' | 'characters' | 'scenes';
@@ -13,6 +15,11 @@ export function projectLocation(id: string | null): string {
 export function workspaceViewFromLocation(href: string): WorkspaceView {
   const view = new URL(href).searchParams.get('view');
   return view === 'projects' || view === 'characters' || view === 'scenes' ? view : 'home';
+}
+
+export function isPublicStudioLocation(href:string):boolean {
+  const id=projectIdFromLocation(href);
+  return workspaceViewFromLocation(href)==='home' && (!id || id===SAMPLE_PROJECT_ID);
 }
 
 export function projectsLocation(): string {

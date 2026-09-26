@@ -26,6 +26,13 @@ const request = async (path, options) => {
 };
 let id;
 try {
+  const publicHome=await fetch(origin);
+  const homepage=await publicHome.text();
+  assert.equal(publicHome.status,200);
+  assert.match(homepage,/让故事，/,'visitors see the original homepage');
+  assert.match(homepage,/登录/);
+  assert.match(homepage,/注册/);
+  assert.equal((await fetch(`${origin}/api/projects/sample-summer-letter`)).status,200,'visitors can browse sample');
   assert.equal((await fetch(`${origin}/api/projects`)).status,401,'anonymous requests cannot list works');
   const alice = await register();
   const bob = await register();

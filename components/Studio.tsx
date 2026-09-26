@@ -5,7 +5,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, Chevron
 import { LogOut } from 'lucide-react';
 import type { AuthUser, Candidate, Project, ProjectSummary, Shot } from '../lib/types';
 import { newShot } from '../lib/domain';
-import { projectsLocation, resourceLibraryLocation, workspaceViewFromLocation, type ProjectSection } from '../lib/navigation';
+import { isPublicStudioLocation, projectsLocation, resourceLibraryLocation, workspaceViewFromLocation, type ProjectSection } from '../lib/navigation';
 import { canDeleteProject } from '../lib/project-access';
 import { DEFAULT_PROJECT_STYLE, PROJECT_STYLE_PRESETS } from '../lib/project-defaults';
 import { formatTime, moveItem } from '../lib/playback';
@@ -28,8 +28,9 @@ function updatedLabel(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新' : `${date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}更新`;
 }
 
-export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>}) {
-  const studio = useStudio();
+export function Studio({user,onLogout,onLogin,authLoading=false}:{user:AuthUser | null;onLogout:()=>Promise<void>;onLogin:(mode?:'login' | 'register',returnTo?:string)=>void;authLoading?:boolean}) {
+  const authenticated=!!user;
+  const studio = useStudio(authenticated);
   const { project, update, busy, readOnly } = studio;
   const [page, setPage] = useState<ProjectSection | 'projects'>('shots');
   const [activeId, setActiveId] = useState('');
@@ -52,7 +53,7 @@ export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>
   const total = project?.shots.reduce((n, s) => n + s.duration, 0) ?? 0;
   const selectedCount = project?.shots.filter(s => s.selectedCandidateId).length ?? 0;
   const disabled = busy || uploading || loggingOut;
-  const editingDisabled = disabled || readOnly;
+  const editingDisabled = disabled || readOnly || !user;
   const patchShot = (patch: Partial<Shot>) => { if (shot && !editingDisabled) update(p => ({ ...p, shots: p.shots.map(s => s.id === shot.id ? { ...s, ...patch } : s) })); };
   function addShot() {
     if (editingDisabled) return;
@@ -78,16 +79,21 @@ export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>
   const openProject = (id: string) => { void studio.open(id); setActiveId(''); setPage('shots'); setMobileNav(false); };
   const openLibraryProject = (id: string, target: 'characters' | 'scenes') => { void studio.open(id); setActiveId(''); setPage(target); setMobileNav(false); };
   const goProjects = async () => {
+    if (!user) { onLogin('login',projectsLocation()); setMobileNav(false); return; }
     if (project && !await studio.home()) return;
     window.history.replaceState(window.history.state, '', projectsLocation());
     setPage('projects'); setMobileNav(false);
   };
   const goResourceLibrary = async (target: 'characters' | 'scenes') => {
+    if (!user) { onLogin('login',resourceLibraryLocation(target)); setMobileNav(false); return; }
     if (project && !await studio.home()) return;
     window.history.replaceState(window.history.state, '', resourceLibraryLocation(target));
     setPage(target); setMobileNav(false); void studio.refreshLibrary();
   };
-  const openCreate = () => { setNewName(''); setNewStyle(DEFAULT_PROJECT_STYLE); setModal('create'); };
+  const openCreate = () => {
+    if (!user) { onLogin('login',projectsLocation()); setMobileNav(false); return; }
+    setNewName(''); setNewStyle(DEFAULT_PROJECT_STYLE); setModal('create');
+  };
   const logout=async ()=>{
     setLoggingOut(true);
     try { await studio.flush(); await onLogout(); }
@@ -97,12 +103,17 @@ export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>
   const status = studio.saveState === '保存失败' ? 'error' : studio.saveState === '已保存' ? 'saved' : 'saving';
   useEffect(() => {
     const syncPage = () => {
+      if (!authenticated && !isPublicStudioLocation(window.location.href)) {
+        setPage('shots');
+        if (!authLoading) onLogin('login',`${window.location.pathname}${window.location.search}`);
+        return;
+      }
       const view = workspaceViewFromLocation(window.location.href);
       setPage(view === 'home' ? 'shots' : view);
     };
     syncPage(); window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
-  }, []);
+  }, [authenticated,authLoading,onLogin]);
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
       <Link className="brand" href="/" aria-label="返回首页" onClick={e => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); if (!disabled) goHome(); }}><span className="brand-symbol"><Clapperboard size={23} strokeWidth={1.8} /></span><span className="brand-name">镜头<span>JINGTOU STUDIO</span></span><span className="beta">BETA</span></Link>
@@ -113,13 +124,13 @@ export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>
       <button className={`nav-item ${!project && page === 'scenes' ? 'active' : ''}`} disabled={uploading} onClick={() => void goResourceLibrary('scenes')}><Mountain size={18} />场景生成<span className="nav-count">{studio.library.scenes.length}</span></button>
       <div className="sidebar-divider" />
       <button className="new-project-button" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button>
-      <div className="sidebar-bottom"><div className="studio-tip"><span className="tip-spark">✦</span><strong>每一个好故事<br />都始于一个镜头。</strong><span>让想象，成为画面。</span></div><button className="nav-item settings-link" onClick={() => setModal('settings')}><Settings2 size={17} />生图服务设置<span className={`connection-dot ${studio.config.configured ? 'connected' : ''}`} /></button><div className="user-profile"><div className="avatar">{user.email[0].toUpperCase()}</div><div className="account-details"><strong title={user.email}>{user.email}</strong><span>个人工作空间</span></div><button className="icon-button account-logout" disabled={disabled} onClick={() => void logout()} aria-label="退出登录" title="退出登录">{loggingOut ? <LoaderCircle size={16} className="spin" /> : <LogOut size={16} />}</button></div></div>
+      <div className="sidebar-bottom"><div className="studio-tip"><span className="tip-spark">✦</span><strong>每一个好故事<br />都始于一个镜头。</strong><span>让想象，成为画面。</span></div><button className="nav-item settings-link" onClick={() => user ? setModal('settings') : onLogin()}><Settings2 size={17} />生图服务设置<span className={`connection-dot ${studio.config.configured ? 'connected' : ''}`} /></button><div className="user-profile"><div className="avatar">{user ? user.email[0].toUpperCase() : '访'}</div><div className="account-details"><strong title={user?.email}>{user?.email || '访客'}</strong><span>{user ? '个人工作空间' : '登录后开启个人创作'}</span></div>{user && <button className="icon-button account-logout" disabled={disabled} onClick={() => void logout()} aria-label="退出登录" title="退出登录">{loggingOut ? <LoaderCircle size={16} className="spin" /> : <LogOut size={16} />}</button>}</div></div>
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="收起导航" onClick={() => setMobileNav(false)} />}
     <main className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><button disabled={disabled} onClick={goHome} aria-label="返回首页">首页</button><ChevronRight size={14} /><button disabled={!project || editingDisabled} onClick={() => setModal('project')}>{project?.name || (page === 'projects' ? '分镜工作台' : page === 'characters' ? '角色库' : page === 'scenes' ? '场景生成' : '创作工作台')}{project && <ChevronDown size={13} />}</button></div><div className="topbar-actions"><span role="status" className={`save-status ${status}`}>{readOnly ? <LockKeyhole size={15} /> : status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{readOnly ? '只读样例' : studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNav(true)}><Menu size={20} /></button><FolderOpen size={16} /><button disabled={disabled} onClick={goHome} aria-label="返回首页">首页</button><ChevronRight size={14} /><button disabled={!project || editingDisabled} onClick={() => setModal('project')}>{project?.name || (page === 'projects' ? '分镜工作台' : page === 'characters' ? '角色库' : page === 'scenes' ? '场景生成' : '创作工作台')}{project && <ChevronDown size={13} />}</button></div><div className="topbar-actions">{user ? <><span role="status" className={`save-status ${status}`}>{readOnly ? <LockKeyhole size={15} /> : status === 'saved' ? <CloudCheck size={15} /> : status === 'error' ? <AlertCircle size={15} /> : <LoaderCircle size={14} className="spin" />}{readOnly ? '只读样例' : studio.saveState}</span><span className="topbar-line" /><button className="button primary compact" disabled={!project?.shots.length} onClick={() => setModal('preview')}><Play size={15} fill="currentColor" />预览成片</button></> : <>{project && <button className="button compact" disabled={!project.shots.length} onClick={() => setModal('preview')}><Play size={15} />预览成片</button>}<button className="button compact" disabled={authLoading} onClick={() => onLogin('login')}>登录</button><button className="button primary compact" disabled={authLoading} onClick={() => onLogin('register')}>注册</button></>}</div></header>
       {studio.error && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>{studio.error}</span>{studio.saveState === '保存失败' && <button onClick={() => void studio.flush().catch(() => {})}>重试保存</button>}<button onClick={() => setModal('reload')}>重新加载</button><button className="icon-button" aria-label="关闭提示" onClick={() => studio.setError('')}><X size={15} /></button></div>}
-      {readOnly && !studio.loading && <div className="sample-banner"><LockKeyhole size={18} /><div><strong>样例作品 · 只读浏览</strong><p>可查看角色、分镜与成片预览；复制后可编辑并保存到我的作品。</p></div><button className="button primary compact" disabled={disabled} onClick={() => void studio.copySample()}>{busy ? <LoaderCircle size={15} className="spin" /> : <Copy size={15} />}复制为我的作品</button></div>}
+      {readOnly && !studio.loading && <div className="sample-banner"><LockKeyhole size={18} /><div><strong>样例作品 · 只读浏览</strong><p>可查看角色、分镜与成片预览；复制后可编辑并保存到我的作品。</p></div><button className="button primary compact" disabled={disabled} onClick={() => user ? void studio.copySample() : onLogin()}>{busy ? <LoaderCircle size={15} className="spin" /> : <Copy size={15} />}复制为我的作品</button></div>}
       {project && !studio.loading && <nav className="workspace-toolbar project-navigation" aria-label="作品编辑"><div className="workspace-tabs"><button className={page !== 'characters' && page !== 'scenes' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('shots')}><Clapperboard size={16} />分镜台<span>{project.shots.length}</span></button><button className={page === 'characters' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('characters')}><UsersRound size={16} />角色设定<span>{project.characters.length}</span></button><button className={page === 'scenes' ? 'selected' : ''} disabled={uploading} onClick={() => setPage('scenes')}><Mountain size={16} />场景生成<span>{project.scenes?.length ?? 0}</span></button></div></nav>}
       {studio.loading ? <div className="loading-state"><LoaderCircle size={30} className="spin" /><h2>正在打开创作空间</h2><p>你的故事，即将续写。</p></div> : !project && page === 'projects' ? <section className="project-library" aria-labelledby="project-library-title">
         <div className="project-library-heading"><div><span className="eyebrow">STORYBOARD WORKSPACE</span><h1 id="project-library-title">我的作品</h1><p>{studio.projects.length ? `共 ${studio.projects.length} 个作品，选择一个继续创作` : '创建第一个作品，开始编排你的故事'}</p></div><button className="button primary" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button></div>

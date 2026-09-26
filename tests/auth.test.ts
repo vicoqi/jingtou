@@ -8,6 +8,20 @@ const password='a correct horse 电车';
 const credentials=(email='creator@example.com')=>({email,password});
 const cookieOf=(response:Response)=>response.headers.get('set-cookie')!.split(';')[0];
 
+test('visitors can browse the fixed sample while personal data and copying still require login',async()=>{
+  const {env,db}=testEnvironment();
+  const path='/api/projects/sample-summer-letter';
+  const response=await handleApiRequest(apiRequest(path),env);
+  assert.equal(response.status,200);
+  const {project}=await response.json();
+  assert.equal(project.id,'sample-summer-letter');
+  assert.equal(project.shots.length,12);
+  for(const [url,method] of [[path,'PUT'],[path,'DELETE'],[`${path}/copy`,'POST'],[`${path}/generate`,'POST'],['/api/projects','GET'],['/api/library','GET'],['/api/upload','POST']] as const) {
+    assert.equal((await handleApiRequest(apiRequest(url,method),env)).status,401,`${method} ${url}`);
+  }
+  assert.equal(db.count('projects'),0);
+});
+
 test('email registration starts a persistent private session without email verification', async () => {
   const {env,db}=testEnvironment();
   const response=await handleApiRequest(apiRequest('/api/auth/register','POST',credentials(' Creator@Example.com ')),env);

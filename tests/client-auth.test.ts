@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { api, setClientUser } from '../lib/client.ts';
+import { api, loadWorkspace, setClientUser } from '../lib/client.ts';
+
+test('opening the public homepage never requests private works, libraries or provider settings', async t=>{
+  const original=globalThis.fetch;
+  t.after(()=>{globalThis.fetch=original;});
+  let calls=0;
+  globalThis.fetch=async ()=>{calls++;return Response.json({error:'private'},{status:401});};
+  const [list,config,library]=await loadWorkspace(false);
+  assert.equal(calls,0);
+  assert.deepEqual(list,{projects:[]});
+  assert.deepEqual(config,{configured:false,model:''});
+  assert.deepEqual(library,{characters:[],scenes:[]});
+});
 
 test('private requests send the expected user and explicitly avoid browser caches', async t => {
   const original=globalThis.fetch;

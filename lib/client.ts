@@ -24,6 +24,10 @@ export async function api<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const listProjects = () => api<{ projects: ProjectSummary[] }>('/api/projects');
 export const getResourceLibrary = () => api<ResourceLibrary>('/api/library');
+export async function loadWorkspace(authenticated:boolean):Promise<[{projects:ProjectSummary[]},{configured:boolean;model:string},ResourceLibrary]> {
+  if (!authenticated) return [{projects:[]},{configured:false,model:''},{characters:[],scenes:[]}];
+  return Promise.all([listProjects(),api<{configured:boolean;model:string}>('/api/config'),getResourceLibrary()]);
+}
 export const getProject = (id: string) => api<{ project: Project }>(`/api/projects/${id}`);
 export const saveProject = (project: Project) => api<{ project: Project }>(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ project }) });
 export async function uploadImage(file: File) {

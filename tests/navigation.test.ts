@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createProjectNavigation, projectLocation, projectIdFromLocation, projectsLocation, resourceLibraryLocation, workspaceViewFromLocation } from '../lib/navigation.ts';
+import { createProjectNavigation, isPublicStudioLocation, projectLocation, projectIdFromLocation, projectsLocation, resourceLibraryLocation, workspaceViewFromLocation } from '../lib/navigation.ts';
+
+test('only the homepage and the bundled sample can be opened without an account',()=>{
+  for(const path of ['/','/?project=sample-summer-letter']) assert.equal(isPublicStudioLocation(`http://localhost:3000${path}`),true,path);
+  for(const path of ['/?view=projects','/?view=characters','/?view=scenes','/?project=private-project','/?view=projects&project=sample-summer-letter']) assert.equal(isPublicStudioLocation(`http://localhost:3000${path}`),false,path);
+});
 
 test('the home URL never implicitly opens a saved project', () => {
   assert.equal(projectIdFromLocation('http://localhost:3000/'), null);

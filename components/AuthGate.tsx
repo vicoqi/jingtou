@@ -1,19 +1,29 @@
 'use client';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Clapperboard, LoaderCircle, LockKeyhole, Mail } from 'lucide-react';
+import { ArrowRight, LoaderCircle, LockKeyhole, Mail } from 'lucide-react';
 import { api, setClientUser } from '../lib/client';
+import { isPublicStudioLocation } from '../lib/navigation';
 import type { AuthUser } from '../lib/types';
 import { Studio } from './Studio';
+import { Modal } from './Modal';
 
 export function AuthGate() {
   const [user,setUser]=useState<AuthUser | null>(null);
   const [checking,setChecking]=useState(true);
   const [loadError,setLoadError]=useState('');
   const [notice,setNotice]=useState('');
+  const [authMode,setAuthMode]=useState<'login' | 'register' | null>(null);
+  const [authBusy,setAuthBusy]=useState(false);
+  const destination=useRef<string | null>(null);
   const requestVersion=useRef(0);
   const channel=useRef<BroadcastChannel | null>(null);
   const applyUser=useCallback((next:AuthUser | null)=>{
     setClientUser(next); setUser(next); setChecking(false); setLoadError('');
+    if (next) setAuthMode(null);
+  },[]);
+  const openAuth=useCallback((mode:'login' | 'register'='login',returnTo?:string)=>{
+    destination.current=returnTo ?? null;
+    setAuthMode(mode);
   },[]);
   const refresh=useCallback(async ()=>{
     const version=++requestVersion.current;
@@ -33,6 +43,7 @@ export function AuthGate() {
     const invalidate=()=>{requestVersion.current++;};
     const expired=()=>{
       requestVersion.current++; applyUser(null); setNotice('登录已过期或账号已切换，请重新登录。');
+      setAuthMode('login');
     };
     const changed=()=>{
       setClientUser(null); setUser(null); setChecking(true); void refresh();
@@ -57,6 +68,8 @@ export function AuthGate() {
     };
   },[applyUser,refresh]);
   const authenticated=(next:AuthUser)=>{
+    if (destination.current) window.history.replaceState(window.history.state,'',destination.current);
+    destination.current=null;
     requestVersion.current++; setNotice(''); applyUser(next); channel.current?.postMessage('changed');
   };
   const logout=async ()=>{
@@ -65,14 +78,23 @@ export function AuthGate() {
     window.history.replaceState(window.history.state,'','/');
     setNotice(''); applyUser(null); channel.current?.postMessage('changed');
   };
-  if (checking) return <main className="auth-loading" role="status"><LoaderCircle size={27} className="spin" /><p>正在打开你的创作空间…</p></main>;
-  if (user) return <Studio key={user.id} user={user} onLogout={logout} />;
-  if (loadError) return <main className="auth-loading"><p role="alert">{loadError}</p><button className="button primary" onClick={()=>{setChecking(true);void refresh();}}>重新连接</button></main>;
-  return <AuthForm onAuthenticated={authenticated} notice={notice} />;
+  const closeAuth=()=>{
+    if (authBusy) return;
+    setAuthMode(null); destination.current=null; setNotice('');
+    if (!isPublicStudioLocation(window.location.href)) {
+      window.history.replaceState(window.history.state,'','/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+  };
+  return <>
+    <Studio key={user?.id ?? 'guest'} user={user} onLogout={logout} onLogin={openAuth} authLoading={checking} />
+    {!user && authMode && <Modal title={authMode==='register' ? '创建你的账号' : '登录镜头工作台'} onClose={closeAuth}>
+      <AuthForm mode={authMode} onModeChange={setAuthMode} onAuthenticated={authenticated} onSubmittingChange={setAuthBusy} notice={notice || loadError} />
+    </Modal>}
+  </>;
 }
 
-function AuthForm({onAuthenticated,notice}:{onAuthenticated:(user:AuthUser)=>void;notice:string}) {
-  const [mode,setMode]=useState<'login' | 'register'>('login');
+function AuthForm({mode,onModeChange,onAuthenticated,onSubmittingChange,notice}:{mode:'login' | 'register';onModeChange:(mode:'login' | 'register')=>void;onAuthenticated:(user:AuthUser)=>void;onSubmittingChange:(busy:boolean)=>void;notice:string}) {
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
   const [confirmation,setConfirmation]=useState('');
@@ -83,23 +105,16 @@ function AuthForm({onAuthenticated,notice}:{onAuthenticated:(user:AuthUser)=>voi
     event.preventDefault();
     if (submitting) return;
     if (registering && password!==confirmation) { setError('两次输入的密码不一致。'); return; }
-    setSubmitting(true); setError('');
+    setSubmitting(true); onSubmittingChange(true); setError('');
     try {
       const result=await api<{user:AuthUser}>(`/api/auth/${mode}`,{method:'POST',body:JSON.stringify({email:email.trim(),password})});
       onAuthenticated(result.user);
     } catch (e) { setError(e instanceof Error ? e.message : '暂时无法登录，请重试。'); }
-    finally { setSubmitting(false); }
+    finally { setSubmitting(false); onSubmittingChange(false); }
   }
-  return <main className="auth-page">
-    <section className="auth-story" aria-label="镜头创作工作台">
-      <div className="auth-brand"><span className="brand-symbol"><Clapperboard size={25} /></span><span className="brand-name">镜头<span>JINGTOU STUDIO</span></span></div>
-      <div className="auth-story-copy"><span className="eyebrow">A STORY IN EVERY FRAME</span><h1>你的故事，<br /><em>从这里继续。</em></h1><p>收藏每一个角色，编排每一帧画面。<br />让想象在属于你的创作空间里发生。</p></div>
-      <div className="auth-art"><img src="/samples/summer.png" alt="夏日车站的动漫故事画面" /><span>夏日来信 · 示例作品</span></div>
-      <div className="auth-story-footer"><span>01 设定角色</span><span>02 编排分镜</span><span>03 预览故事</span></div>
-    </section>
-    <section className="auth-form-panel" aria-labelledby="auth-title">
-      <div className="auth-form-wrap"><span className="eyebrow">YOUR CREATIVE SPACE</span><h2 id="auth-title">{registering ? '创建你的账号' : '欢迎回来'}</h2><p className="auth-intro">{registering ? '注册后即可开始创作，暂不需要邮箱验证。' : '登录后，继续制作你的作品。'}</p>
-        <div className="auth-mode" aria-label="选择登录或注册"><button type="button" aria-pressed={!registering} className={!registering ? 'selected' : ''} disabled={submitting} onClick={()=>{setMode('login');setError('');setConfirmation('');}}>登录</button><button type="button" aria-pressed={registering} className={registering ? 'selected' : ''} disabled={submitting} onClick={()=>{setMode('register');setError('');}}>注册</button></div>
+  return <div className="auth-dialog-content">
+        <p className="auth-intro">{registering ? '注册后即可开始创作，暂不需要邮箱验证。' : '登录后，保存和继续制作你的作品。'}</p>
+        <div className="auth-mode" aria-label="选择登录或注册"><button type="button" aria-pressed={!registering} className={!registering ? 'selected' : ''} disabled={submitting} onClick={()=>{onModeChange('login');setError('');setConfirmation('');}}>登录</button><button type="button" aria-pressed={registering} className={registering ? 'selected' : ''} disabled={submitting} onClick={()=>{onModeChange('register');setError('');}}>注册</button></div>
         <form className="modal-form auth-form" onSubmit={event=>void submit(event)}>
           <label htmlFor="auth-email"><span><Mail size={15} />邮箱地址</span><input id="auth-email" name="email" type="email" autoComplete="username" required maxLength={254} value={email} disabled={submitting} onChange={event=>setEmail(event.target.value)} placeholder="you@example.com" autoFocus /></label>
           <label htmlFor="auth-password"><span><LockKeyhole size={15} />密码</span><input id="auth-password" name="password" type="password" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={8} maxLength={128} value={password} disabled={submitting} onChange={event=>setPassword(event.target.value)} placeholder="8–128 个字符" /></label>
@@ -108,7 +123,5 @@ function AuthForm({onAuthenticated,notice}:{onAuthenticated:(user:AuthUser)=>voi
           <button className="button primary auth-submit" type="submit" disabled={submitting}>{submitting ? <><LoaderCircle size={17} className="spin" />{registering ? '正在创建账号…' : '正在登录…'}</> : <>{registering ? '注册并开始创作' : '登录工作台'}<ArrowRight size={17} /></>}</button>
         </form>
         <p className="auth-privacy"><LockKeyhole size={13} />作品、角色与场景保存在你的账号下</p>
-      </div>
-    </section>
-  </main>;
+  </div>;
 }

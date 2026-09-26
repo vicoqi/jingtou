@@ -1,18 +1,18 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationKind, Project, ProjectSummary, ResourceLibrary } from '../lib/types';
-import { api, getProject, getResourceLibrary, listProjects, saveProject } from '../lib/client';
+import { api, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
 
-export function useStudio() {
+export function useStudio(authenticated:boolean) {
   const [project, setProject] = useState<Project | null>(null);
   const current = useRef<Project | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [library, setLibrary] = useState<ResourceLibrary>({ characters: [], scenes: [] });
-  const [libraryLoading, setLibraryLoading] = useState(true);
-  const [loading, setLoading] = useState(true);
+  const [libraryLoading, setLibraryLoading] = useState(authenticated);
+  const [loading, setLoading] = useState(authenticated);
   const [working, setWorking] = useState(false);
   const [navigating, setNavigating] = useState(false);
   const [saveState, setSaveState] = useState('已保存');
@@ -24,8 +24,9 @@ export function useStudio() {
   const alive = useRef(true);
   const libraryRequest = useRef(0);
   const replace = useCallback((p: Project | null) => { current.current = p; setProject(p); }, []);
-  const refreshList = useCallback(async () => { const result = await listProjects(); if (alive.current) setProjects(result.projects); }, []);
+  const refreshList = useCallback(async () => { if (!authenticated) return; const result = await listProjects(); if (alive.current) setProjects(result.projects); }, [authenticated]);
   const refreshLibrary = useCallback(async () => {
+    if (!authenticated) return;
     const request = ++libraryRequest.current;
     setLibraryLoading(true);
     try {
@@ -36,7 +37,7 @@ export function useStudio() {
     } finally {
       if (alive.current && request === libraryRequest.current) setLibraryLoading(false);
     }
-  }, []);
+  }, [authenticated]);
   const flush = useCallback(async function flushSave(): Promise<void> {
     clearTimeout(timer.current);
     if (pending.current) { await pending.current; if (dirty.current) await flushSave(); return; }
@@ -63,10 +64,10 @@ export function useStudio() {
     if (dirty.current) await flushSave();
   }, [replace, refreshLibrary]);
   const update = useCallback((fn: (p: Project) => Project) => {
-    if (!current.current || isReadOnlyProject(current.current)) return;
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
     replace(fn(current.current)); dirty.current = true; setSaveState('等待保存…');
     clearTimeout(timer.current); timer.current = setTimeout(() => { void flush().catch(() => {}); }, 600);
-  }, [replace, flush]);
+  }, [authenticated, replace, flush]);
   const writeLocation = useCallback((id: string | null, mode: 'push' | 'replace') => {
     const url = projectLocation(id);
     if (mode === 'push' && `${window.location.pathname}${window.location.search}${window.location.hash}` === url) return;
@@ -75,27 +76,34 @@ export function useStudio() {
   const navigation = useMemo(() => createProjectNavigation<Project>({
     current: () => current.current,
     save: flush,
-    load: async id => (await getProject(id)).project,
+    load: async id => {
+      if (!authenticated && id!==SAMPLE_PROJECT_ID) throw new Error('请先登录后打开作品。');
+      return (await getProject(id)).project;
+    },
     show: replace,
     write: writeLocation,
     loading: setNavigating,
     error: setError,
-  }), [flush, replace, writeLocation]);
+  }), [authenticated, flush, replace, writeLocation]);
   useEffect(() => {
     let active = true;
     alive.current = true;
     const initialVersion = navigation.version;
-    Promise.all([listProjects(), api<{ configured: boolean; model: string }>('/api/config'), getResourceLibrary()]).then(async ([list, settings, resources]) => {
+    const visibleProjectId=()=>{
+      const id=projectIdFromLocation(window.location.href);
+      return authenticated || id===SAMPLE_PROJECT_ID ? id : null;
+    };
+    loadWorkspace(authenticated).then(async ([list, settings, resources]) => {
       if (!active) return;
       setProjects(list.projects); setConfig(settings); setLibrary(resources); setLibraryLoading(false);
-      if (navigation.version === initialVersion) await navigation.navigate(projectIdFromLocation(window.location.href), 'none');
+      if (navigation.version === initialVersion) await navigation.navigate(visibleProjectId(), 'none');
     }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) { setLoading(false); setLibraryLoading(false); } });
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty.current || pending.current) { event.preventDefault(); event.returnValue = ''; } };
-    const popState = () => { void navigation.navigate(projectIdFromLocation(window.location.href), 'none'); };
+    const popState = () => { void navigation.navigate(visibleProjectId(), 'none'); };
     window.addEventListener('beforeunload', beforeUnload);
     window.addEventListener('popstate', popState);
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
-  }, [navigation]);
+  }, [authenticated,navigation]);
   const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating');
   const projectId = project?.id;
   useEffect(() => {
@@ -115,6 +123,7 @@ export function useStudio() {
     return opened;
   }
   async function createAndOpen(path: string, body?: { name: string; style?: string }) {
+    if (!authenticated) return false;
     setWorking(true); setError('');
     const version = navigation.version;
     try {
@@ -131,7 +140,7 @@ export function useStudio() {
     ? createAndOpen(`/api/projects/${SAMPLE_PROJECT_ID}/copy`)
     : Promise.resolve(false);
   async function generate(shotId: string, count: number, kind: GenerationKind = 'shots') {
-    if (!current.current || isReadOnlyProject(current.current)) return;
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
     setWorking(true); setError('');
     const id = current.current.id;
     const version = navigation.version;
@@ -156,6 +165,7 @@ export function useStudio() {
     } finally { setWorking(false); }
   }
   async function removeProject(id: string):Promise<boolean> {
+    if (!authenticated) return false;
     if (!canDeleteProject({id})) { setError('预设样例作品不可删除。'); return false; }
     setWorking(true);
     try {
