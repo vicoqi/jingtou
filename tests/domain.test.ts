@@ -24,7 +24,7 @@ test('new shot starts empty at five seconds', () => {
 });
 
 test('legacy projects gain default voices and empty audio state', () => {
-  const legacy = structuredClone(project([shot('x')])) as any;
+  const legacy = structuredClone(project([shot('x')])) as unknown as {characters:Record<string,unknown>[];shots:Record<string,unknown>[]};
   legacy.characters = [{id:'c', name:'C', description:'', references:[]}];
   legacy.shots[0].characterIds = ['c'];
   delete legacy.characters[0].voice;

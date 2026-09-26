@@ -34,10 +34,15 @@ try {
   assert.match(homepage,/注册/);
   assert.equal((await fetch(`${origin}/api/projects/sample-summer-letter`)).status,200,'visitors can browse sample');
   assert.equal((await fetch(`${origin}/api/projects`)).status,401,'anonymous requests cannot list works');
+  assert.equal((await fetch(`${origin}/api/config`)).status,401,'anonymous requests cannot inspect provider settings');
   const alice = await register();
   const bob = await register();
   activeCookie = alice.cookie;
   assert.equal((await request('/api/auth/me')).user.email,alice.email);
+  const config=await request('/api/config');
+  assert.equal(typeof config.speech.configured,'boolean');
+  assert.equal(config.speech.provider,'Azure Speech');
+  assert.deepEqual(config.speech.voices,{female:'女声',male:'男声'});
   const page = await fetchSigned(origin);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /镜头/);
@@ -48,7 +53,7 @@ try {
   assert.equal(sample.id,'sample-summer-letter');
   assert.equal(before.projects.filter(project=>project.id===sample.id).length,1,'workbench lists the sample exactly once');
   assert.deepEqual(await request('/api/projects'),before, 'browsing does not save a project');
-  for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST'],[`${samplePath}/generate-scene`,'POST']]) {
+  for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST'],[`${samplePath}/generate-scene`,'POST'],[`${samplePath}/generate-audio`,'POST']]) {
     const denied = await fetchSigned(`${origin}${path}`,{method});
     assert.equal(denied.status,403,`${method} ${path}`);
   }
@@ -61,6 +66,18 @@ try {
   assert.equal(project.characters.length, 2);
   assert.equal(project.shots.length, 12);
   assert.equal(project.shots.reduce((n, s) => n + s.duration, 0), 60);
+  const legacy=structuredClone(project);
+  delete legacy.characters[0].voice;
+  delete legacy.shots[0].speakerCharacterId;
+  delete legacy.shots[0].audio;
+  project=(await request(`/api/projects/${id}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project:legacy})})).project;
+  assert.equal(project.characters[0].voice,'female');
+  assert.equal(project.shots[0].speakerCharacterId,null);
+  assert.equal(project.shots[0].audio.status,'idle');
+  if (!config.speech.configured) {
+    const unconfigured=await fetchSigned(`${origin}/api/projects/${id}/generate-audio`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({shotId:project.shots[1].id})});
+    assert.equal(unconfigured.status,503,'unconfigured speech generation stops before provider work');
+  }
   for (const url of new Set(project.shots.flatMap(s => s.candidates.map(c => c.url)).concat(project.characters.flatMap(c => c.references.map(r => r.url))))) {
     const response = await fetchSigned(`${origin}${url}`);
     assert.equal(response.status, 200, `sample image ${url}`);
@@ -138,7 +155,7 @@ try {
   assert.deepEqual(afterRemoval.shots.map(s=>s.candidates),existingShots.map(s=>s.candidates));
   assert.deepEqual(afterRemoval.shots.map(s=>s.selectedCandidateId),existingShots.map(s=>s.selectedCandidateId));
   assert.deepEqual((await request(samplePath)).project,sample,'copy edits preserve the original sample');
-  console.log('HTTP smoke passed: email registration, login, session revocation, two-account project/image/library isolation, readonly sample, explicit copy, project URL, demo assets, 2 characters, 12 shots / 60s, edit/save/reload, preserved selection, revision conflict, uploaded reference, global character/scene libraries, scene selection persistence, multi-shot scene links, scene deletion without losing shot images. No paid generation requested.');
+  console.log('HTTP smoke passed: email registration, login, session revocation, two-account project/image/library isolation, readonly sample, explicit copy, project URL, speech config privacy, legacy voice/audio defaults, demo assets, 2 characters, 12 shots / 60s, edit/save/reload, preserved selection, revision conflict, uploaded reference, global character/scene libraries, scene selection persistence, multi-shot scene links, scene deletion without losing shot images. No paid generation requested.');
 } finally {
   if (id && activeCookie) await request(`/api/projects/${id}`, { method: 'DELETE' }).catch(()=>{});
   for (const account of accounts) await fetchAs(account.cookie,`${origin}/api/auth/logout`,{method:'POST'}).catch(()=>{});
