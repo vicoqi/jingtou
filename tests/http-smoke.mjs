@@ -15,6 +15,7 @@ try {
   const before = await request('/api/projects');
   const sample = (await request(samplePath)).project;
   assert.equal(sample.id,'sample-summer-letter');
+  assert.equal(before.projects.filter(project=>project.id===sample.id).length,1,'workbench lists the sample exactly once');
   assert.deepEqual(await request('/api/projects'),before, 'browsing does not save a project');
   for (const [path,method] of [[samplePath,'PUT'],[samplePath,'DELETE'],[`${samplePath}/generate`,'POST'],[`${samplePath}/generate-scene`,'POST']]) {
     const denied = await fetch(`${origin}${path}`,{method});

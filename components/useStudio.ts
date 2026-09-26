@@ -4,7 +4,7 @@ import type { GenerationKind, Project, ProjectSummary, ResourceLibrary } from '.
 import { api, getProject, getResourceLibrary, listProjects, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
-import { isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
+import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
 
 export function useStudio() {
   const [project, setProject] = useState<Project | null>(null);
@@ -155,17 +155,18 @@ export function useStudio() {
       if (navigation.version === version) setError(message);
     } finally { setWorking(false); }
   }
-  async function remove() {
-    if (!current.current || isReadOnlyProject(current.current)) return;
+  async function removeProject(id: string):Promise<boolean> {
+    if (!canDeleteProject({id})) { setError('预设样例作品不可删除。'); return false; }
     setWorking(true);
-    const id = current.current.id;
     try {
-      await flush(); await api(`/api/projects/${id}`, { method: 'DELETE' });
+      if (current.current?.id === id) await flush();
+      await api(`/api/projects/${id}`, { method: 'DELETE' });
       if (current.current?.id === id) { await navigation.navigate(null, 'replace'); dirty.current = false; setSaveState('已保存'); }
-      await refreshList(); void refreshLibrary();
+      await refreshList(); await refreshLibrary(); return true;
     }
-    catch (e) { setError((e as Error).message); } finally { setWorking(false); }
+    catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
+  async function remove():Promise<boolean> { return current.current ? removeProject(current.current.id) : false; }
   async function reload() {
     if (!current.current) { window.location.reload(); return; }
     setWorking(true);
@@ -178,5 +179,5 @@ export function useStudio() {
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
-  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, flush, reload, refreshLibrary };
+  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, removeProject, flush, reload, refreshLibrary };
 }

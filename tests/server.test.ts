@@ -42,7 +42,9 @@ const json = async (response: Response) => response.json() as Promise<any>;
 test('API initializes missing tables and index idempotently', async () => {
   const first = await handleApiRequest(request('/api/projects'),env);
   assert.equal(first.status,200);
-  assert.deepEqual((await json(first)).projects,[]);
+  const projects=(await json(first)).projects;
+  assert.equal(projects.length,1);
+  assert.equal(projects[0].id,'sample-summer-letter');
   assert.equal(db.schema.size,3);
   const again = await handleApiRequest(request('/api/projects'),env);
   assert.equal(again.status,200);
@@ -65,7 +67,11 @@ test('browsing the canonical sample is stable and does not create saved projects
   assert.deepEqual((await json(other)).project,sample);
   assert.equal(db.projects.size,before);
   const list = (await json(await handleApiRequest(request('/api/projects'),env))).projects;
-  assert.ok(!list.some((p:any)=>p.id===sample.id));
+  const listedSample = list.filter((p:any)=>p.id===sample.id);
+  assert.equal(listedSample.length,1);
+  assert.equal(listedSample[0].name,'夏日来信 · 样例');
+  assert.equal(listedSample[0].shotCount,12);
+  assert.equal(db.projects.size,before,'listing the sample must not persist it');
 });
 
 test('sample rejects saving, deletion and generation without touching data or provider', async () => {

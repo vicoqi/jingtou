@@ -204,7 +204,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     }
     if (path==='/api/projects' && request.method==='GET') {
       const rows=(await env.DB.prepare('SELECT id, owner, revision, document, updated_at FROM projects WHERE owner = ? ORDER BY updated_at DESC').bind(owner).all<ProjectRow>()).results;
-      return json({projects:rows.map(row=>summarizeProject(readProject(row)))});
+      return json({projects:[summarizeProject(createSamplePreview()),...rows.map(row=>summarizeProject(readProject(row)))]});
     }
     if (path==='/api/library' && request.method==='GET') {
       const rows=(await env.DB.prepare('SELECT id, owner, revision, document, updated_at FROM projects WHERE owner = ? ORDER BY updated_at DESC').bind(owner).all<ProjectRow>()).results;
