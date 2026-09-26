@@ -75,7 +75,6 @@ export function Preview({ project }: { project: Project }) {
     <div className={`preview-screen ratio-${project.aspectRatio === '9:16' ? 'portrait' : 'landscape'}`}>
       {frame.image ? <img src={frame.image} alt={`镜头 ${frame.index + 1}：${frame.shot?.dialogue || '预览画面'}`} /> : <div className="empty-frame"><ImageOff size={36} /><h3>{frame.shot ? `镜头 ${String(frame.index + 1).padStart(2, '0')} 暂无选定画面` : '还没有分镜'}</h3><p>返回分镜台，为这个镜头选择一张画面</p></div>}
       <span className="screen-label">{String(frame.index + 1).padStart(2, '0')} / {String(project.shots.length).padStart(2, '0')}</span>
-      {frame.shot?.dialogue && <div className="subtitle">{frame.shot.dialogue}</div>}
     </div>
     <div className="player-controls">
       <button className="icon-button" aria-label="回到开头" onClick={() => seek(0)}><SkipBack size={18} /></button>
