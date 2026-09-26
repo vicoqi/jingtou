@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GenerationKind, Project, ProjectSummary, ResourceLibrary } from '../lib/types';
-import { api, EMPTY_WORKSPACE_CONFIG, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
+import type { Character, GenerationKind, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from '../lib/types';
+import { api, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
@@ -189,6 +189,23 @@ export function useStudio(authenticated:boolean) {
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
+  async function generateCharacter(draft:Pick<Character,'name'|'description'>,count:number):Promise<ReferenceImage[]> {
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) throw new Error('当前作品不能生成角色参考图。');
+    setWorking(true); setError('');
+    const id=current.current.id;
+    const version=navigation.version;
+    try {
+      await flush();
+      if (current.current?.id!==id || navigation.version!==version) throw new Error('作品已切换，请重新生成。');
+      const result=await generateCharacterImages(id,{name:draft.name,description:draft.description,count});
+      if (current.current?.id!==id || navigation.version!==version) throw new Error('作品已切换，请重新生成。');
+      return result.images;
+    } catch (e) {
+      const message=e instanceof Error ? e.message : '角色参考图生成失败，请重试。';
+      if (navigation.version===version) setError(message);
+      throw e instanceof Error ? e : new Error(message);
+    } finally { setWorking(false); }
+  }
   async function generateAudio(shotId:string) {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
     setWorking(true); setError('');
@@ -212,5 +229,5 @@ export function useStudio(authenticated:boolean) {
       if (navigation.version===version) setError(message);
     } finally { setWorking(false); }
   }
-  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
+  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
 }

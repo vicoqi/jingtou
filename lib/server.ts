@@ -1,11 +1,11 @@
-import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
+import { buildCharacterPrompt, buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
 import { mergeGeneration, normalizeProject, summarizeProject, validateProject } from './domain.ts';
 import { createSpeechProvider, DEFAULT_QWEN_TTS_MODEL, type SpeechProvider } from './speech.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
 import { ApiError, bodyJson, checkRequestOrigin, fail, json } from './http.ts';
-import type { Candidate, GeneratedFrame, GenerationKind, Project, ResourceLibrary } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
@@ -28,6 +28,7 @@ type AssetRow = { id:string; owner:string; mime:string; name:string };
 const uuidPath = /^\/api\/assets\/([a-f0-9-]{36})$/;
 const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
 const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
+const characterGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-character$/;
 const audioGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-audio$/;
 const staleAfter = 10 * 60 * 1000;
 const schemaStatements = [
@@ -207,6 +208,39 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   }
 }
 
+async function handleGenerateCharacter(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch):Promise<Response> {
+  const body=await bodyJson(request);
+  const name=typeof body.name==='string' ? body.name.trim() : '';
+  const description=typeof body.description==='string' ? body.description.trim() : '';
+  const count=body.count;
+  if (!name || name.length>120) fail(400,'请填写不超过 120 个字符的角色名称。');
+  if (!description || description.length>3000) fail(400,'请填写不超过 3000 个字符的外观设定。');
+  if (typeof count!=='number' || !Number.isInteger(count) || count<1 || count>4) fail(400,'请选择生成 1–4 张角色参考图。');
+  const current=await loadRecovered(env,id,owner);
+  const key=env.IMAGE_API_KEY || env.OPENAI_API_KEY;
+  const model=env.IMAGE_MODEL?.trim();
+  if (!key || !model) fail(503,'请配置图片生成密钥和模型');
+  const prompt=buildCharacterPrompt(current,{name,description});
+  const output=await requestImageGeneration({
+    key,
+    model,
+    baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',
+    prompt,
+    count,
+    aspectRatio:'9:16',
+    fetcher,
+  });
+  const images:ReferenceImage[]=[];
+  for (const [index,result] of output.entries()) {
+    const assetId=crypto.randomUUID();
+    const fileName=`${name}-AI参考图-${index + 1}.${result.mime.split('/')[1]}`.slice(0,200);
+    await env.ASSETS_BUCKET.put(assetId,result.bytes,{httpMetadata:{contentType:result.mime}});
+    await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,result.mime,fileName).run();
+    images.push({id:assetId,url:`/api/assets/${assetId}`,name:fileName});
+  }
+  return json({images});
+}
+
 async function audioGenerationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,result?:{url:string;duration:number;sourceText:string;sourceVoice:'female'|'male'},error?:string):Promise<Project> {
   for (let attempt=0;attempt<12;attempt++) {
     const current=readProject(await rowFor(env,id,owner));
@@ -273,7 +307,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
     const owner=(await requireUser(request,env)).id;
     if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public});
-    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-audio`) {
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-character` || path === `${samplePath}/generate-audio`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }
     if (path === `${samplePath}/copy` && request.method === 'POST') {
@@ -341,6 +375,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     }
     const generateMatch=path.match(generationPath);
     if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],generateMatch[2]==='generate-scene'?'scenes':'shots',options.fetcher,options.waitUntil);
+    const characterGenerateMatch=path.match(characterGenerationPath);
+    if (characterGenerateMatch && request.method==='POST') return await handleGenerateCharacter(request,env,owner,characterGenerateMatch[1],options.fetcher);
     const audioGenerateMatch=path.match(audioGenerationPath);
     if (audioGenerateMatch && request.method==='POST') return await handleGenerateAudio(request,env,owner,audioGenerateMatch[1],options.fetcher,options.waitUntil);
     const match=path.match(projectPath);

@@ -97,6 +97,7 @@ test('sample rejects saving, deletion and generation without touching data or pr
       ['PUT',samplePath,{project:{id:'sample-summer-letter',name:'Overwrite',readOnly:false}}],
       ['DELETE',samplePath,undefined],
       ['POST',`${samplePath}/generate`,{shotId:'sample-shot-1',count:1}],
+      ['POST',`${samplePath}/generate-character`,{name:'林夏',description:'蓝色短发',count:1}],
       ['POST',`${samplePath}/generate-audio`,{shotId:'sample-shot-1'}],
     ] as const) {
       const response = await handleApiRequest(request(path,method,body,owner),env,options);
@@ -519,6 +520,55 @@ test('private addresses and client flags do not bypass identity checks outside L
 const scenePng = new Uint8Array([137,80,78,71,13,10,26,10,1]);
 const sceneOutput = () => new Response(JSON.stringify({data:[{b64_json:btoa(String.fromCharCode(...scenePng))}]}));
 const sceneEnv = () => ({...env,OPENAI_API_KEY:'test-key'});
+
+test('character reference generation uses the project style and stores private images without changing the project', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'角色制作',style:'水彩绘本'}),env))).project;
+  let calls=0;
+  const response=await handleApiRequest(request(`/api/projects/${p.id}/generate-character`,'POST',{name:'林夏',description:'蓝色短发，黄色雨衣',count:2}),sceneEnv(),{fetcher:async (url,init)=>{
+    calls++;
+    assert.match(String(url),/\/images\/generations$/);
+    const body=JSON.parse(String(init?.body));
+    assert.match(body.prompt,/水彩绘本/);
+    assert.match(body.prompt,/林夏/);
+    assert.match(body.prompt,/蓝色短发，黄色雨衣/);
+    assert.match(body.prompt,/one person only/i);
+    return sceneOutput();
+  }});
+  assert.equal(response.status,200,await response.clone().text());
+  assert.equal(calls,2);
+  const images=(await json(response)).images;
+  assert.equal(images.length,2);
+  assert.deepEqual(images.map((image:any)=>image.name),['林夏-AI参考图-1.png','林夏-AI参考图-2.png']);
+  for (const image of images) {
+    assert.match(image.id,/^[a-f0-9-]{36}$/);
+    assert.equal(image.url,`/api/assets/${image.id}`);
+    const stored=await handleApiRequest(request(image.url),env);
+    assert.deepEqual(new Uint8Array(await stored.arrayBuffer()),scenePng);
+    assert.equal((await handleApiRequest(request(image.url,'GET',undefined,'b@example.com'),env)).status,404);
+  }
+  const unchanged=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.equal(unchanged.revision,p.revision);
+  assert.deepEqual(unchanged.characters,[]);
+});
+
+test('character reference generation validates the draft, provider configuration, owner and sample access', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'角色校验'}),env))).project;
+  const url=`/api/projects/${p.id}/generate-character`;
+  let called=false;
+  const fetcher=async()=>{called=true;return sceneOutput();};
+  for (const input of [
+    {name:'',description:'蓝色短发',count:1},
+    {name:'林夏',description:' ',count:1},
+    {name:'林夏',description:'蓝色短发',count:0},
+    {name:'林夏',description:'蓝色短发',count:5},
+    {name:'林夏',description:'蓝色短发',count:1.5},
+  ]) assert.equal((await handleApiRequest(request(url,'POST',input),sceneEnv(),{fetcher})).status,400);
+  assert.equal((await handleApiRequest(request(url,'POST',{name:'林夏',description:'蓝色短发',count:1}),env,{fetcher})).status,503);
+  assert.equal((await handleApiRequest(request(url,'POST',{name:'林夏',description:'蓝色短发',count:1},'b@example.com'),sceneEnv(),{fetcher})).status,404);
+  assert.equal((await handleApiRequest(request(`${samplePath}/generate-character`,'POST',{name:'林夏',description:'蓝色短发',count:1}),sceneEnv(),{fetcher})).status,403);
+  assert.equal(called,false);
+});
+
 async function sceneProject() {
   const p = (await json(await handleApiRequest(request('/api/projects','POST',{name:'场景制作',style:'电影写实摄影'}),env))).project;
   p.scenes = [{...newScene(),name:'海边车站',description:'蓝色长椅，白色站棚'}];

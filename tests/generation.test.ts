@@ -1,11 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildShotPrompt, requestImageEdits, requestImageGeneration } from '../lib/generation.ts';
+import { buildCharacterPrompt, buildShotPrompt, requestImageEdits, requestImageGeneration } from '../lib/generation.ts';
 import { emptyShotAudio } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
 const shot: Shot = { id:'s', title:'追逐', characterIds:['c'], scene:'雨夜街道', description:'主角回头', dialogue:'快跑！', duration:5, speakerCharacterId:'c', audio:emptyShotAudio(), candidates:[], selectedCandidateId:null, status:'idle', error:null, generationId:null, generationStartedAt:null };
 const project: Project = { id:'p', name:'故事', description:'', aspectRatio:'16:9', style:'国风动漫', characters:[{id:'c', name:'阿岚', description:'蓝色短发', voice:'female', references:[{id:'r', name:'ref.png', url:'/api/assets/00000000-0000-0000-0000-000000000001'}]}], shots:[shot], revision:1, createdAt:'', updatedAt:'' };
+
+test('character prompt inherits project style and asks for a reusable single-person reference', () => {
+  const prompt=buildCharacterPrompt(project,{name:'阿岚',description:'蓝色短发，琥珀色眼睛，黑色短夹克'});
+  assert.match(prompt,/国风动漫/);
+  assert.match(prompt,/阿岚/);
+  assert.match(prompt,/蓝色短发，琥珀色眼睛，黑色短夹克/);
+  assert.match(prompt,/one person only/i);
+  assert.match(prompt,/full-body/i);
+  assert.match(prompt,/No extra people.*text/i);
+  assert.throws(()=>buildCharacterPrompt(project,{name:' ',description:'蓝色短发'}),/角色名称/);
+  assert.throws(()=>buildCharacterPrompt(project,{name:'阿岚',description:' '}),/外观设定/);
+});
 
 test('prompt uses the character description currently in the project', () => {
   assert.match(buildShotPrompt(project, shot), /蓝色短发/);

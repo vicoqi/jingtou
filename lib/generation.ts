@@ -1,4 +1,4 @@
-import type { Project, Scene, Shot } from './types.ts';
+import type { Character, Project, Scene, Shot } from './types.ts';
 
 export type ImageBytes = { bytes: Uint8Array; mime: 'image/png' | 'image/jpeg' | 'image/webp' };
 export type ReferenceBytes = ImageBytes & { name: string };
@@ -38,6 +38,19 @@ export function buildScenePrompt(project: Project, scene: Scene): string {
     `Visual style: ${scene.style?.trim() || project.style || 'anime illustration'}.`,
     `Location: ${scene.name}. Environment, layout, lighting and details: ${scene.description}.`,
     `Compose a clear establishing view suitable for ${project.aspectRatio} framing, showing the spatial layout and distinctive landmarks for reuse across shots.`,
+  ].join('\n');
+}
+
+export function buildCharacterPrompt(project:Project,character:Pick<Character,'name'|'description'>):string {
+  const name=character.name.trim();
+  const description=character.description.trim();
+  if (!name) throw new Error('请填写角色名称后再生成。');
+  if (!description) throw new Error('请填写外观设定后再生成。');
+  return [
+    'Create one reusable full-body character design reference image for a short drama. Show one person only in a natural neutral pose with a clear face, hairstyle, clothing, main accessories, and body proportions.',
+    `Visual style: ${project.style || 'anime illustration'}.`,
+    `Character: ${name}. Appearance: ${description}.`,
+    'Use a simple unobtrusive background and even lighting so the design can be reused consistently in later shots. No extra people, text, labels, character-sheet annotations, speech bubbles, subtitles, watermarks, borders, or collage panels.',
   ].join('\n');
 }
 

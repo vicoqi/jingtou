@@ -33,6 +33,7 @@ export async function loadWorkspace(authenticated:boolean):Promise<[{projects:Pr
 }
 export const getProject = (id: string) => api<{ project: Project }>(`/api/projects/${id}`);
 export const saveProject = (project: Project) => api<{ project: Project }>(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ project }) });
+export const generateCharacterImages = (projectId:string,input:{name:string;description:string;count:number}) => api<{images:ReferenceImage[]}>(`/api/projects/${projectId}/generate-character`,{method:'POST',body:JSON.stringify(input)});
 export const generateShotAudio = (projectId:string,shotId:string) => api<{project:Project}>(`/api/projects/${projectId}/generate-audio`,{method:'POST',body:JSON.stringify({shotId})});
 export async function uploadImage(file: File) {
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('请选择 PNG、JPG 或 WebP 图片。');

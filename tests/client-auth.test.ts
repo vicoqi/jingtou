@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { api, generateShotAudio, loadWorkspace, setClientUser } from '../lib/client.ts';
+import { api, generateCharacterImages, generateShotAudio, loadWorkspace, setClientUser } from '../lib/client.ts';
 
 test('opening the public homepage never requests private works, libraries or provider settings', async t=>{
   const original=globalThis.fetch;
@@ -25,6 +25,21 @@ test('shot audio generation uses the project audio endpoint', async t => {
     return Response.json({project:{id:'project-a'}});
   };
   assert.deepEqual(await generateShotAudio('project-a','shot-a'),{project:{id:'project-a'}});
+});
+
+test('character reference generation sends the current draft to the project image endpoint', async t => {
+  const original=globalThis.fetch;
+  t.after(()=>{globalThis.fetch=original;setClientUser(null);});
+  setClientUser({id:'user-a',email:'a@example.com'});
+  globalThis.fetch=async (url,init)=>{
+    assert.equal(url,'/api/projects/project-a/generate-character');
+    assert.equal(init?.method,'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)),{name:'林夏',description:'蓝色短发，黄色雨衣',count:2});
+    return Response.json({images:[{id:'ref-a',url:'/api/assets/ref-a',name:'林夏-AI参考图-1.png'}]});
+  };
+  assert.deepEqual(await generateCharacterImages('project-a',{name:'林夏',description:'蓝色短发，黄色雨衣',count:2}),{
+    images:[{id:'ref-a',url:'/api/assets/ref-a',name:'林夏-AI参考图-1.png'}],
+  });
 });
 
 test('private requests send the expected user and explicitly avoid browser caches', async t => {
