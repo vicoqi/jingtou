@@ -14,6 +14,18 @@ const env: any = { DB:db, ASSETS_BUCKET:{ put:async (key:string, body:ArrayBuffe
 const request = (path:string, method='GET', body?:unknown, owner='a@example.com') => new Request(`https://studio.example${path}`, { method, headers:{cookie:cookies.get(owner) ?? '', ...(body ? {'content-type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined });
 const json = async (response: Response) => response.json() as Promise<any>;
 
+function speechWav(seconds=1):Uint8Array {
+  const byteRate=48_000;
+  const dataSize=Math.round(byteRate * seconds);
+  const bytes=new Uint8Array(44 + dataSize);
+  const view=new DataView(bytes.buffer);
+  const ascii=(offset:number,value:string)=>[...value].forEach((char,index)=>view.setUint8(offset + index,char.charCodeAt(0)));
+  ascii(0,'RIFF'); view.setUint32(4,36 + dataSize,true); ascii(8,'WAVE');
+  ascii(12,'fmt '); view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true); view.setUint32(24,24_000,true); view.setUint32(28,byteRate,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+  ascii(36,'data'); view.setUint32(40,dataSize,true);
+  return bytes;
+}
+
 before(async () => {
   for (const email of ['a@example.com','b@example.com','library@example.com','foreign-library@example.com']) {
     const response=await handleApiRequest(apiRequest('/api/auth/register','POST',{email,password:'test password 123'}),env);
@@ -67,6 +79,7 @@ test('sample rejects saving, deletion and generation without touching data or pr
       ['PUT',samplePath,{project:{id:'sample-summer-letter',name:'Overwrite',readOnly:false}}],
       ['DELETE',samplePath,undefined],
       ['POST',`${samplePath}/generate`,{shotId:'sample-shot-1',count:1}],
+      ['POST',`${samplePath}/generate-audio`,{shotId:'sample-shot-1'}],
     ] as const) {
       const response = await handleApiRequest(request(path,method,body,owner),env,options);
       assert.equal(response.status,403,`${method} ${path}`);
@@ -114,6 +127,7 @@ test('explicit sample copies are editable and owner scoped while the original st
 test('generation configuration requires both a key and an explicit model', async () => {
   const before=(await json(await handleApiRequest(request('/api/config'),env)));
   assert.equal(before.configured,false);
+  assert.equal(before.speech.configured,false);
   env.OPENAI_API_KEY='test-key';
   env.IMAGE_MODEL='';
   const missing=(await json(await handleApiRequest(request('/api/config'),env)));
@@ -125,6 +139,115 @@ test('generation configuration requires both a key and an explicit model', async
   assert.equal(denied.status,503);
   env.OPENAI_API_KEY='';
   env.IMAGE_MODEL='gpt-image-2.5-flare';
+});
+
+test('audio generation uses the speaking character voice and saves private WAV bytes', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'配音测试'}),env))).project;
+  p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
+  p.shots=[{...newShot(),id:'line',title:'对白',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'你 & 我一起去看海。'}];
+  const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env))).project;
+  const speechEnv={...env,AZURE_SPEECH_KEY:'speech-key',AZURE_SPEECH_REGION:'eastasia'};
+  const config=await json(await handleApiRequest(request('/api/config'),speechEnv));
+  assert.equal(config.speech.configured,true);
+  assert.deepEqual(config.speech.voices,{female:'女声',male:'男声'});
+  let calls=0;
+  const response=await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:async (url,init)=>{
+    calls++;
+    assert.equal(String(url),'https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1');
+    assert.match(String(init?.body),/zh-CN-XiaoxiaoNeural/);
+    assert.match(String(init?.body),/你 &amp; 我一起去看海。/);
+    return new Response(speechWav().buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
+  }});
+  assert.equal(response.status,200,await response.clone().text());
+  assert.equal(calls,1);
+  const generated=(await json(response)).project;
+  assert.equal(generated.revision,saved.revision + 2);
+  assert.equal(generated.shots[0].audio.status,'idle');
+  assert.equal(generated.shots[0].audio.duration,1);
+  assert.equal(generated.shots[0].audio.sourceText,'你 & 我一起去看海。');
+  assert.equal(generated.shots[0].audio.sourceVoice,'female');
+  assert.match(generated.shots[0].audio.url,/^\/api\/assets\//);
+  const audio=await handleApiRequest(request(generated.shots[0].audio.url),speechEnv);
+  assert.equal(audio.status,200);
+  assert.equal(audio.headers.get('content-type'),'audio/wav');
+  assert.deepEqual(new Uint8Array(await audio.arrayBuffer()),speechWav());
+  assert.equal((await handleApiRequest(request(generated.shots[0].audio.url,'GET',undefined,'b@example.com'),speechEnv)).status,404);
+});
+
+test('audio generation validates configuration, dialogue and speaking character before calling provider', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'无效配音'}),env))).project;
+  p.characters=[{id:'speaker',name:'陈屿',description:'',voice:'male',references:[]}];
+  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'测试'}];
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env);
+  let called=false;
+  const fetcher=async()=>{called=true;return new Response(speechWav().buffer as ArrayBuffer);};
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),env,{fetcher})).status,503);
+  const configured={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const loaded=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),configured))).project;
+  loaded.shots[0].dialogue='   ';
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:loaded}),configured);
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),configured,{fetcher})).status,400);
+  const again=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),configured))).project;
+  again.shots[0].dialogue='测试';
+  again.shots[0].speakerCharacterId=null;
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:again}),configured);
+  assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),configured,{fetcher})).status,400);
+  assert.equal(called,false);
+});
+
+test('failed audio regeneration keeps the previous recording and becomes retryable', async () => {
+  const speechEnv={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'配音重试'}),speechEnv))).project;
+  p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
+  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'第一版对白'}];
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),speechEnv);
+  const first=(await json(await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:async()=>new Response(speechWav().buffer as ArrayBuffer)}))).project;
+  const original=first.shots[0].audio;
+  first.shots[0].dialogue='第二版对白';
+  const edited=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:first}),speechEnv))).project;
+  const failed=await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:async()=>new Response('failure',{status:429})});
+  assert.equal(failed.status,502);
+  const after=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),speechEnv))).project;
+  assert.equal(after.revision,edited.revision + 2);
+  assert.equal(after.shots[0].audio.status,'failed');
+  assert.match(after.shots[0].audio.error,/429/);
+  assert.equal(after.shots[0].audio.url,original.url);
+  assert.equal(after.shots[0].audio.sourceText,'第一版对白');
+});
+
+test('audio generation merges into the latest edit while retaining its source snapshot', async () => {
+  const speechEnv={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'并发配音'}),speechEnv))).project;
+  p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
+  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'生成前的对白'}];
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),speechEnv);
+  let release!:()=>void;
+  let registered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const ready=new Promise<void>(resolve=>{registered=resolve;});
+  let background:Promise<unknown> | undefined;
+  const pending=handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{
+    fetcher:async()=>{await gate;return new Response(speechWav().buffer as ArrayBuffer);},
+    waitUntil:promise=>{background=promise;registered();},
+  });
+  await Promise.race([ready,pending]);
+  assert.ok(background);
+  try {
+    const during=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),speechEnv))).project;
+    assert.equal(during.shots[0].audio.status,'generating');
+    during.shots[0].dialogue='生成时改过的对白';
+    during.characters[0].voice='male';
+    const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:during}),speechEnv))).project;
+    assert.equal(saved.shots[0].audio.status,'generating');
+  } finally { release(); }
+  const response=await pending;
+  await background;
+  assert.equal(response.status,200);
+  const final=(await json(response)).project;
+  assert.equal(final.shots[0].dialogue,'生成时改过的对白');
+  assert.equal(final.characters[0].voice,'male');
+  assert.equal(final.shots[0].audio.sourceText,'生成前的对白');
+  assert.equal(final.shots[0].audio.sourceVoice,'female');
 });
 
 test('sample only links to shipped images and spans sixty seconds', () => {

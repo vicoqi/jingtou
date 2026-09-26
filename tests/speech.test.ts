@@ -26,7 +26,7 @@ test('Azure request maps female and male voices and escapes dialogue', async () 
       assert.equal(new Headers(init?.headers).get('Ocp-Apim-Subscription-Key'),'key');
       assert.equal(new Headers(init?.headers).get('X-Microsoft-OutputFormat'),'riff-24khz-16bit-mono-pcm');
       body=String(init?.body);
-      return new Response(wavFixture(),{headers:{'content-type':'audio/wav'}});
+      return new Response(wavFixture().buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
     },
   });
   assert.match(body,new RegExp(AZURE_VOICES.female));

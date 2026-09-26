@@ -11,6 +11,8 @@ interface Env {
   IMAGE_API_KEY?: string;
   IMAGE_API_BASE_URL?: string;
   IMAGE_MODEL?: string;
+  AZURE_SPEECH_KEY?: string;
+  AZURE_SPEECH_REGION?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

@@ -16,7 +16,7 @@ test('visitors can browse the fixed sample while personal data and copying still
   const {project}=await response.json();
   assert.equal(project.id,'sample-summer-letter');
   assert.equal(project.shots.length,12);
-  for(const [url,method] of [[path,'PUT'],[path,'DELETE'],[`${path}/copy`,'POST'],[`${path}/generate`,'POST'],['/api/projects','GET'],['/api/library','GET'],['/api/upload','POST']] as const) {
+  for(const [url,method] of [[path,'PUT'],[path,'DELETE'],[`${path}/copy`,'POST'],[`${path}/generate`,'POST'],[`${path}/generate-audio`,'POST'],['/api/projects','GET'],['/api/library','GET'],['/api/upload','POST']] as const) {
     assert.equal((await handleApiRequest(apiRequest(url,method),env)).status,401,`${method} ${url}`);
   }
   assert.equal(db.count('projects'),0);
@@ -108,8 +108,8 @@ test('two accounts cannot read, save, delete or generate each other’s projects
   assert.equal(projects.some((p:{id:string})=>p.id===project.id),false);
   assert.deepEqual(await (await handleApiRequest(apiRequest('/api/library','GET',undefined,cb),env)).json(),{characters:[],scenes:[]});
   let providerCalled=false;
-  for (const [suffix,method,body] of [['','GET',undefined],['','PUT',{project}],['','DELETE',undefined],['/generate','POST',{shotId:project.shots[0].id,count:1}],['/generate-scene','POST',{sceneId:'scene',count:1}]] as const) {
-    const result=await handleApiRequest(apiRequest(`/api/projects/${project.id}${suffix}`,method,body,cb),{...env,IMAGE_API_KEY:'test',IMAGE_MODEL:'test'},{fetcher:async()=>{providerCalled=true;throw new Error('must not generate');}});
+  for (const [suffix,method,body] of [['','GET',undefined],['','PUT',{project}],['','DELETE',undefined],['/generate','POST',{shotId:project.shots[0].id,count:1}],['/generate-scene','POST',{sceneId:'scene',count:1}],['/generate-audio','POST',{shotId:project.shots[0].id}]] as const) {
+    const result=await handleApiRequest(apiRequest(`/api/projects/${project.id}${suffix}`,method,body,cb),{...env,IMAGE_API_KEY:'test',IMAGE_MODEL:'test',AZURE_SPEECH_KEY:'test',AZURE_SPEECH_REGION:'eastasia'},{fetcher:async()=>{providerCalled=true;throw new Error('must not generate');}});
     assert.equal(result.status,404,`${method} ${suffix}`);
   }
   assert.equal(providerCalled,false);

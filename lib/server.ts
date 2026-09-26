@@ -1,5 +1,6 @@
 import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
 import { mergeGeneration, normalizeProject, summarizeProject, validateProject } from './domain.ts';
+import { requestAzureSpeech } from './speech.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
@@ -9,12 +10,13 @@ import type { Candidate, GeneratedFrame, GenerationKind, Project, ResourceLibrar
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
 type Bucket = { put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null> };
-export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string };
+export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string; AZURE_SPEECH_KEY?:string; AZURE_SPEECH_REGION?:string };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
 type AssetRow = { id:string; owner:string; mime:string; name:string };
 const uuidPath = /^\/api\/assets\/([a-f0-9-]{36})$/;
 const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
 const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
+const audioGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-audio$/;
 const staleAfter = 10 * 60 * 1000;
 const schemaStatements = [
   'CREATE TABLE IF NOT EXISTS assets (id text PRIMARY KEY NOT NULL, owner text NOT NULL, mime text NOT NULL, name text NOT NULL)',
@@ -49,7 +51,13 @@ function recoverStale(project:Project):Project | null {
     changed = true;
     return {...s,status:'failed' as const,error:'生成已中断，请重试。',generationId:null,generationStartedAt:null};
   };
-  const shots = project.shots.map(recover);
+  const shots = project.shots.map(shot => {
+    const recovered=recover(shot);
+    const audio=recovered.audio;
+    if (audio.status !== 'generating' || !audio.generationStartedAt || Date.now() - Date.parse(audio.generationStartedAt) <= staleAfter) return recovered;
+    changed = true;
+    return {...recovered,audio:{...audio,status:'failed' as const,error:'配音生成已中断，请重试。',generationId:null,generationStartedAt:null}};
+  });
   const scenes = (project.scenes ?? []).map(recover);
   return changed ? {...project, shots, scenes} : null;
 }
@@ -65,15 +73,19 @@ async function loadRecovered(env:ApiEnv,id:string,owner:string):Promise<Project>
 }
 
 async function validateOwnedAssets(env:ApiEnv,project:Project,owner:string):Promise<void> {
-  const urls = new Set<string>();
-  for (const c of project.characters) for (const r of c.references) urls.add(r.url);
-  for (const s of project.shots) for (const c of s.candidates) urls.add(c.url);
-  for (const s of project.scenes ?? []) for (const c of s.candidates) urls.add(c.url);
-  for (const url of urls) {
+  const urls = new Map<string,'image'|'audio'>();
+  for (const c of project.characters) for (const r of c.references) urls.set(r.url,'image');
+  for (const s of project.shots) {
+    for (const c of s.candidates) urls.set(c.url,'image');
+    if (s.audio.url) urls.set(s.audio.url,'audio');
+  }
+  for (const s of project.scenes ?? []) for (const c of s.candidates) urls.set(c.url,'image');
+  for (const [url,kind] of urls) {
     const match=url.match(uuidPath);
     if (!match) continue;
     const asset=await env.DB.prepare('SELECT id, owner, mime, name FROM assets WHERE id = ? AND owner = ?').bind(match[1],owner).first<AssetRow>();
-    if (!asset || asset.owner !== owner) fail(400,'Project uses an image you do not own');
+    if (!asset || asset.owner !== owner) fail(400,'作品使用了不属于当前账号的素材');
+    if ((kind === 'image' && !asset.mime.startsWith('image/')) || (kind === 'audio' && asset.mime !== 'audio/wav')) fail(400,'作品素材类型不正确');
   }
 }
 
@@ -165,6 +177,62 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   }
 }
 
+async function audioGenerationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,result?:{url:string;duration:number;sourceText:string;sourceVoice:'female'|'male'},error?:string):Promise<Project> {
+  for (let attempt=0;attempt<12;attempt++) {
+    const current=readProject(await rowFor(env,id,owner));
+    const shot=current.shots.find(item=>item.id===shotId);
+    if (!shot || shot.audio.generationId!==generationId || shot.audio.status!=='generating') fail(409,'Audio generation was superseded');
+    const audio=result
+      ? {...shot.audio,...result,status:'idle' as const,error:null,generationId:null,generationStartedAt:null}
+      : {...shot.audio,status:'failed' as const,error:error || 'Speech generation failed',generationId:null,generationStartedAt:null};
+    const merged={...current,shots:current.shots.map(item=>item.id===shotId ? {...item,audio} : item)};
+    const saved=await saveCas(env,merged,owner,current.revision);
+    if (saved) return saved;
+  }
+  fail(409,'Project changed repeatedly; reload and retry');
+}
+
+async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
+  const body=await bodyJson(request);
+  if (typeof body.shotId!=='string') fail(400,'请选择需要生成配音的镜头。');
+  const key=env.AZURE_SPEECH_KEY?.trim();
+  const region=env.AZURE_SPEECH_REGION?.trim();
+  if (!key || !region) fail(503,'请配置 Azure Speech 密钥和区域');
+  const current=await loadRecovered(env,id,owner);
+  const shot=current.shots.find(item=>item.id===body.shotId);
+  if (!shot) fail(404,'镜头不存在。');
+  if (shot.audio.status==='generating') fail(409,'配音正在生成，请稍候。');
+  const sourceText=shot.dialogue.trim();
+  if (!sourceText) fail(400,'请先填写镜头对白。');
+  if (sourceText.length>1000) fail(400,'单个镜头对白不能超过 1000 个字符。');
+  const speaker=shot.speakerCharacterId ? current.characters.find(character=>character.id===shot.speakerCharacterId) : null;
+  if (!speaker || !shot.characterIds.includes(speaker.id)) fail(400,'请从出场角色中选择说话角色。');
+  const sourceVoice=speaker.voice;
+  const generationId=crypto.randomUUID();
+  const started={...current,shots:current.shots.map(item=>item.id===shot.id ? {...item,audio:{...item.audio,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}} : item)};
+  const startedSaved=await saveCas(env,started,owner,current.revision);
+  if (!startedSaved) fail(409,'Project changed; reload and retry');
+  const generation=(async ():Promise<Project>=>{
+    try {
+      const output=await requestAzureSpeech({key,region,gender:sourceVoice,text:sourceText,fetcher});
+      const assetId=crypto.randomUUID();
+      await env.ASSETS_BUCKET.put(assetId,output.bytes,{httpMetadata:{contentType:output.mime}});
+      await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,output.mime,`${shot.title || '镜头配音'}.wav`.slice(0,200)).run();
+      return await audioGenerationResult(env,owner,id,shot.id,generationId,{url:`/api/assets/${assetId}`,duration:output.duration,sourceText,sourceVoice});
+    } catch (error) {
+      const message=error instanceof Error ? error.message : 'Speech generation failed';
+      await audioGenerationResult(env,owner,id,shot.id,generationId,undefined,message).catch(()=>{});
+      throw error instanceof Error ? error : new Error(message);
+    }
+  })();
+  waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  try {
+    return json({project:await generation});
+  } catch (error) {
+    fail(502,error instanceof Error ? error.message : 'Speech generation failed');
+  }
+}
+
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
     checkRequestOrigin(request);
@@ -174,8 +242,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
     const owner=(await requireUser(request,env)).id;
-    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
-    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene`) {
+    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:{configured:!!(env.AZURE_SPEECH_KEY?.trim() && env.AZURE_SPEECH_REGION?.trim()),provider:'Azure Speech',voices:{female:'女声',male:'男声'}}});
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-audio`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }
     if (path === `${samplePath}/copy` && request.method === 'POST') {
@@ -224,9 +292,9 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const assetMatch=path.match(uuidPath);
     if (assetMatch && request.method==='GET') {
       const asset=await env.DB.prepare('SELECT id, owner, mime, name FROM assets WHERE id = ? AND owner = ?').bind(assetMatch[1],owner).first<AssetRow>();
-      if (!asset || asset.owner!==owner) fail(404,'Image not found');
+      if (!asset || asset.owner!==owner) fail(404,'素材不存在');
       const object=await env.ASSETS_BUCKET.get(asset.id);
-      if (!object) fail(404,'Image file not found');
+      if (!object) fail(404,'素材文件不存在');
       return new Response(object.body,{headers:{'content-type':asset.mime,'cache-control':'private, no-store','x-content-type-options':'nosniff'}});
     }
     if (path==='/api/upload' && request.method==='POST') {
@@ -243,6 +311,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     }
     const generateMatch=path.match(generationPath);
     if (generateMatch && request.method==='POST') return await handleGenerate(request,env,owner,generateMatch[1],generateMatch[2]==='generate-scene'?'scenes':'shots',options.fetcher,options.waitUntil);
+    const audioGenerateMatch=path.match(audioGenerationPath);
+    if (audioGenerateMatch && request.method==='POST') return await handleGenerateAudio(request,env,owner,audioGenerateMatch[1],options.fetcher,options.waitUntil);
     const match=path.match(projectPath);
     if (match && request.method==='GET') return json({project:await loadRecovered(env,match[1],owner)});
     if (match && request.method==='PUT') {
@@ -260,6 +330,12 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
         });
       };
       const safe:Project={...proposed,createdAt:current.createdAt,shots:protectGeneration(proposed.shots,current.shots),scenes:protectGeneration(proposed.scenes ?? [],current.scenes ?? [])};
+      const existingShots=new Map(current.shots.map(shot=>[shot.id,shot]));
+      safe.shots=safe.shots.map(shot=>{
+        const old=existingShots.get(shot.id);
+        if (old?.audio.status==='generating') return {...shot,audio:{...shot.audio,url:old.audio.url,duration:old.audio.duration,sourceText:old.audio.sourceText,sourceVoice:old.audio.sourceVoice,status:old.audio.status,error:old.audio.error,generationId:old.audio.generationId,generationStartedAt:old.audio.generationStartedAt}};
+        return {...shot,audio:{...shot.audio,status:shot.audio.status==='generating'?'idle':shot.audio.status,generationId:null,generationStartedAt:null}};
+      });
       const saved=await saveCas(env,safe,owner,current.revision);
       if (!saved) fail(409,'Project changed; reload and retry');
       return json({project:saved});
