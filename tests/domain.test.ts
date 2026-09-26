@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getTimeline, shotAtTime, newShot, validateProject, mergeGeneration } from '../lib/domain.ts';
+import { emptyShotAudio, getTimeline, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
-const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', duration, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
+const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', duration, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
 
 test('timeline preserves ordering and end boundary belongs to next shot', () => {
@@ -19,6 +19,24 @@ test('new shot starts empty at five seconds', () => {
   assert.equal(result.duration, 5);
   assert.equal(result.status, 'idle');
   assert.equal(result.selectedCandidateId, null);
+  assert.equal(result.speakerCharacterId, null);
+  assert.deepEqual(result.audio, emptyShotAudio());
+});
+
+test('legacy projects gain default voices and empty audio state', () => {
+  const legacy = structuredClone(project([shot('x')])) as any;
+  legacy.characters = [{id:'c', name:'C', description:'', references:[]}];
+  legacy.shots[0].characterIds = ['c'];
+  delete legacy.characters[0].voice;
+  delete legacy.shots[0].speakerCharacterId;
+  delete legacy.shots[0].audio;
+
+  const normalized = normalizeProject(legacy);
+
+  assert.equal(normalized.characters[0].voice, 'female');
+  assert.equal(normalized.shots[0].speakerCharacterId, null);
+  assert.deepEqual(normalized.shots[0].audio, emptyShotAudio());
+  assert.doesNotThrow(() => validateProject(normalized));
 });
 
 test('creating shots works on LAN HTTP where crypto.randomUUID is unavailable', () => {
@@ -40,7 +58,7 @@ test('creating shots works on LAN HTTP where crypto.randomUUID is unavailable', 
 test('validation rejects invalid duration and malformed reference URLs', () => {
   assert.throws(() => validateProject(project([shot('x', 0)])), /duration/i);
   const p = project([shot('x')]);
-  p.characters.push({id:'c', name:'C', description:'', references:[{id:'r', name:'bad', url:'https://outside.example/a.jpg'}]});
+  p.characters.push({id:'c', name:'C', description:'', voice:'female', references:[{id:'r', name:'bad', url:'https://outside.example/a.jpg'}]});
   assert.throws(() => validateProject(p), /reference/i);
 });
 

@@ -17,8 +17,8 @@ function buildProject(name: string, demo: boolean, id: string, now: string, styl
   project.name = '夏日来信 · 样例';
   project.description = '三张示例素材编排为十二个分镜，共六十秒，用于体验流程。';
   project.characters = [
-    { id:'sample-character-1', name:'林夏', description:'深蓝色短发，米白上衣，青绿色裙子，珊瑚色发带。活泼而真诚。', references:[{id:'sample-ref-1', name:'林夏参考图', url:'/samples/linxia.png'}] },
-    { id:'sample-character-2', name:'陈屿', description:'棕色短发，米白衬衫，深蓝色背包。安静温柔。', references:[{id:'sample-ref-2', name:'陈屿参考图', url:'/samples/chenyu.png'}] },
+    { id:'sample-character-1', name:'林夏', description:'深蓝色短发，米白上衣，青绿色裙子，珊瑚色发带。活泼而真诚。', voice:'female', references:[{id:'sample-ref-1', name:'林夏参考图', url:'/samples/linxia.png'}] },
+    { id:'sample-character-2', name:'陈屿', description:'棕色短发，米白衬衫，深蓝色背包。安静温柔。', voice:'male', references:[{id:'sample-ref-2', name:'陈屿参考图', url:'/samples/chenyu.png'}] },
   ];
   const scenes = [
     ['夏日来信','海边小镇','林夏在窗边读到一封多年未寄出的信。','原来你一直记得。'],
@@ -38,7 +38,7 @@ function buildProject(name: string, demo: boolean, id: string, now: string, styl
   project.shots = scenes.map(([title,scene,description,dialogue],i) => {
     const images = i === 0 ? sampleImages : [sampleImages[(i - 1) % sampleImages.length]];
     const candidates = images.map((url,j) => ({id:`sample-candidate-${i+1}-${j+1}`,url,createdAt:now,prompt:'样例素材',batchId:'sample',source:'sample' as const}));
-    return {...newShot(),id:`sample-shot-${i+1}`,title,scene,description,dialogue,characterIds:['sample-character-1','sample-character-2'],candidates,selectedCandidateId:candidates[0].id};
+    return {...newShot(),id:`sample-shot-${i+1}`,title,scene,description,dialogue,characterIds:['sample-character-1','sample-character-2'],speakerCharacterId:i % 2 === 0 ? 'sample-character-1' : 'sample-character-2',candidates,selectedCandidateId:candidates[0].id};
   });
   return project;
 }

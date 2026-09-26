@@ -214,11 +214,11 @@ test('global resource library aggregates every owned project without leaking for
   const library = await json(response);
   assert.equal(library.characters.length,2);
   assert.deepEqual(library.characters.find((item:any)=>item.name==='林夏'),{
-    id:'hero',name:'林夏',description:'蓝色短发',references:[{id:'hero-ref',name:'正面',url:'/samples/linxia.png'}],
+    id:'hero',name:'林夏',description:'蓝色短发',voice:'female',references:[{id:'hero-ref',name:'正面',url:'/samples/linxia.png'}],
     projectId:first.id,projectName:'海边故事',shotCount:1,
   });
   assert.deepEqual(library.characters.find((item:any)=>item.name==='陈屿'),{
-    id:'friend',name:'陈屿',description:'棕色短发',references:[],
+    id:'friend',name:'陈屿',description:'棕色短发',voice:'female',references:[],
     projectId:second.id,projectName:'城市故事',shotCount:0,
   });
   assert.deepEqual(library.scenes.map((item:any)=>({name:item.name,project:item.projectName,shots:item.shotCount,candidates:item.candidateCount,preview:item.previewUrl,style:item.style})),[
@@ -382,9 +382,13 @@ async function sceneProject() {
 test('old project documents gain an empty scene library on reload', async () => {
   const p = await sceneProject();
   delete p.scenes;
+  delete p.shots[0].speakerCharacterId;
+  delete p.shots[0].audio;
   db.sqlite.prepare('UPDATE projects SET document = ? WHERE id = ?').run(JSON.stringify(p),p.id);
   const reloaded = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.deepEqual(reloaded.scenes,[]);
+  assert.equal(reloaded.shots[0].speakerCharacterId,null);
+  assert.equal(reloaded.shots[0].audio.status,'idle');
 });
 
 test('scene generation saves real image bytes and preserves selected history through failure and retry', async () => {

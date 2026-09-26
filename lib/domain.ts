@@ -1,8 +1,12 @@
-import type { Candidate, GenerationKind, Project, ProjectSummary, Scene, Shot } from './types.ts';
+import type { Candidate, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio } from './types.ts';
 import { newId } from './id.ts';
 
+export function emptyShotAudio(): ShotAudio {
+  return { url: null, duration: null, sourceText: null, sourceVoice: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+}
+
 export function newShot(): Shot {
-  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', duration: 5, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', duration: 5, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newScene(style = ''): Scene {
@@ -30,6 +34,24 @@ export function shotAtTime(shots: Shot[], time: number): Shot | null {
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
 const internalImage = (url: unknown): url is string => isString(url) && (/^\/api\/assets\/[a-f0-9-]{36}$/.test(url) || /^\/samples\/(?:summer|linxia|chenyu)\.png$/.test(url));
+const internalAudio = (url: unknown): url is string => isString(url) && /^\/api\/assets\/[a-f0-9-]{36}$/.test(url);
+
+export function normalizeProject(value: unknown): Project {
+  if (!isRecord(value)) return value as Project;
+  const characters = Array.isArray(value.characters) ? value.characters.map(character => {
+    if (!isRecord(character) || character.voice !== undefined) return character;
+    return { ...character, voice: 'female' };
+  }) : value.characters;
+  const shots = Array.isArray(value.shots) ? value.shots.map(shot => {
+    if (!isRecord(shot)) return shot;
+    return {
+      ...shot,
+      speakerCharacterId: shot.speakerCharacterId === undefined ? null : shot.speakerCharacterId,
+      audio: shot.audio === undefined ? emptyShotAudio() : shot.audio,
+    };
+  }) : value.shots;
+  return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots } as Project;
+}
 
 function validateCandidates(value: Record<string, unknown>): void {
   if (!Array.isArray(value.candidates) || value.candidates.length > 200) throw new Error('Invalid candidates');
@@ -46,7 +68,7 @@ export function validateProject(value: unknown): asserts value is Project {
   if (value.name.trim().length < 1 || value.name.length > 120 || value.description.length > 5000 || value.style.length > 2000 || value.shots.length > 200 || value.characters.length > 100) throw new Error('Invalid project fields');
   const characterIds = new Set<string>();
   for (const c of value.characters) {
-    if (!isRecord(c) || !isString(c.id) || !isString(c.name) || !isString(c.description) || !Array.isArray(c.references) || c.references.length > 20 || c.name.length > 120 || c.description.length > 3000 || characterIds.has(c.id)) throw new Error('Invalid character');
+    if (!isRecord(c) || !isString(c.id) || !isString(c.name) || !isString(c.description) || !['female','male'].includes(String(c.voice)) || !Array.isArray(c.references) || c.references.length > 20 || c.name.length > 120 || c.description.length > 3000 || characterIds.has(c.id)) throw new Error('Invalid character');
     characterIds.add(c.id);
     for (const ref of c.references) if (!isRecord(ref) || !isString(ref.id) || !isString(ref.name) || !internalImage(ref.url)) throw new Error('Invalid reference image');
   }
@@ -63,7 +85,12 @@ export function validateProject(value: unknown): asserts value is Project {
     shotIds.add(s.id);
     if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid shot duration');
     if (s.characterIds.some((id: unknown) => !isString(id) || !characterIds.has(id))) throw new Error('Invalid shot character');
+    if (!(s.speakerCharacterId === null || (isString(s.speakerCharacterId) && s.characterIds.includes(s.speakerCharacterId)))) throw new Error('Invalid shot speaker');
     if (s.sceneId !== undefined && s.sceneId !== null && (!isString(s.sceneId) || !sceneIds.has(s.sceneId))) throw new Error('Invalid shot scene');
+    if (!isRecord(s.audio) || !['idle','generating','failed'].includes(String(s.audio.status)) || !(s.audio.url === null || internalAudio(s.audio.url)) || !(s.audio.duration === null || (Number.isFinite(s.audio.duration) && Number(s.audio.duration) > 0 && Number(s.audio.duration) <= 3600)) || !(s.audio.sourceText === null || (isString(s.audio.sourceText) && s.audio.sourceText.length <= 1000)) || !(s.audio.sourceVoice === null || ['female','male'].includes(String(s.audio.sourceVoice))) || !(s.audio.error === null || isString(s.audio.error)) || !(s.audio.generationId === null || isString(s.audio.generationId)) || !(s.audio.generationStartedAt === null || isString(s.audio.generationStartedAt))) throw new Error('Invalid shot audio');
+    if (s.audio.url !== null && (s.audio.duration === null || s.audio.sourceText === null || s.audio.sourceVoice === null)) throw new Error('Invalid shot audio');
+    if (s.audio.url === null && (s.audio.duration !== null || s.audio.sourceText !== null || s.audio.sourceVoice !== null)) throw new Error('Invalid shot audio');
+    if (s.audio.status === 'generating' && (!s.audio.generationId || !s.audio.generationStartedAt)) throw new Error('Invalid shot audio generation');
     validateCandidates(s);
   }
 }

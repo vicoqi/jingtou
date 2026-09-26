@@ -1,5 +1,5 @@
 import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
-import { mergeGeneration, summarizeProject, validateProject } from './domain.ts';
+import { mergeGeneration, normalizeProject, summarizeProject, validateProject } from './domain.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
@@ -33,8 +33,7 @@ async function rowFor(env:ApiEnv,id:string,owner:string):Promise<ProjectRow> {
   return row;
 }
 const readProject = (row:ProjectRow):Project => {
-  const project = JSON.parse(row.document) as Project;
-  return { ...project, scenes: project.scenes ?? [] };
+  return normalizeProject(JSON.parse(row.document));
 };
 
 async function saveCas(env:ApiEnv,project:Project,owner:string,expectedRevision:number):Promise<Project | null> {
@@ -249,7 +248,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (match && request.method==='PUT') {
       const current=await loadRecovered(env,match[1],owner);
       const body=await bodyJson(request);
-      const proposed=body?.project;
+      const proposed=normalizeProject(body?.project);
       try { validateProject(proposed); } catch (error) { fail(400,error instanceof Error ? error.message : 'Invalid project'); }
       if (proposed.id!==match[1] || proposed.revision!==current.revision) fail(409,'Project changed; reload and retry');
       await validateOwnedAssets(env,proposed,owner);
