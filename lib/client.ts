@@ -1,4 +1,7 @@
-import type { Project, ProjectSummary, ReferenceImage, ResourceLibrary } from './types';
+import type { AuthUser, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from './types';
+
+let currentUserId:string | null=null;
+export function setClientUser(user:AuthUser | null):void { currentUserId=user?.id ?? null; }
 
 export class ApiError extends Error {
   status: number;
@@ -6,8 +9,15 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: init?.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init?.headers } });
+  const requestUserId=currentUserId;
+  const authRequest=url.startsWith('/api/auth/');
+  const headers=new Headers(init?.headers);
+  if (!(init?.body instanceof FormData)) headers.set('Content-Type','application/json');
+  if (requestUserId) headers.set('X-Jingtou-User',requestUserId);
+  const response = await fetch(url, { ...init, headers, credentials:'same-origin', cache:'no-store' });
   const data = await response.json().catch(() => ({ error: '服务暂时不可用，请稍后重试。' }));
+  if (!authRequest && requestUserId!==currentUserId) throw new ApiError('账号已切换，请重试。',409);
+  if (response.status===401 && (!authRequest || url==='/api/auth/logout') && requestUserId===currentUserId && typeof window!=='undefined') window.dispatchEvent(new Event('jingtou:unauthorized'));
   if (!response.ok) throw new ApiError(data.error || '操作失败，请重试。', response.status);
   return data;
 }

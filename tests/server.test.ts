@@ -1,43 +1,26 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- In-memory D1 fixture mirrors heterogeneous database rows and JSON responses. */
-import test from 'node:test';
+import test, { before } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApiRequest } from '../lib/server.ts';
 import { createProject } from '../lib/sample.ts';
 import { newScene, newShot } from '../lib/domain.ts';
 
-class MemoryDB {
-  projects = new Map<string, any>();
-  assets = new Map<string, any>();
-  schema = new Set<string>();
-  prepare(sql: string) {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias -- The nested D1 statement closure retains this fixture.
-    const db = this;
-    if (!sql.startsWith('CREATE') && db.schema.size !== 3) throw new Error('no such table: projects');
-    return { bind(...args: any[]) {
-      return {
-        async first() {
-          if (sql.includes('FROM projects')) return db.projects.get(args[0]) ?? null;
-          if (sql.includes('FROM assets')) return db.assets.get(args[0]) ?? null;
-          return null;
-        },
-        async all() { return { results: [...db.projects.values()].filter(x => x.owner === args[0]).sort((a,b) => b.updated_at.localeCompare(a.updated_at)) }; },
-        async run() {
-          if (sql.startsWith('CREATE')) { db.schema.add(sql); return {meta:{changes:0}}; }
-          if (sql.startsWith('INSERT INTO projects')) { db.projects.set(args[0], {id:args[0], owner:args[1], revision:args[2], document:args[3], updated_at:args[4]}); return {meta:{changes:1}}; }
-          if (sql.startsWith('UPDATE projects')) { const row = db.projects.get(args[3]); if (!row || row.owner !== args[4] || row.revision !== args[5]) return {meta:{changes:0}}; row.document=args[0]; row.revision=args[1]; row.updated_at=args[2]; return {meta:{changes:1}}; }
-          if (sql.startsWith('DELETE FROM projects')) { const row = db.projects.get(args[0]); if (!row || row.owner !== args[1]) return {meta:{changes:0}}; db.projects.delete(args[0]); return {meta:{changes:1}}; }
-          if (sql.startsWith('INSERT INTO assets')) { db.assets.set(args[0], {id:args[0], owner:args[1], mime:args[2], name:args[3]}); return {meta:{changes:1}}; }
-          throw new Error(`Unknown SQL: ${sql}`);
-        }
-      };
-    }};
-  }
-}
-const db = new MemoryDB();
+import { TestDatabase, apiRequest } from './helpers/database.ts';
+
+const db = new TestDatabase();
+const cookies = new Map<string,string>();
 const objects = new Map<string, Uint8Array>();
 const env: any = { DB:db, ASSETS_BUCKET:{ put:async (key:string, body:ArrayBuffer|Uint8Array) => { objects.set(key, new Uint8Array(body)); }, get:async (key:string) => objects.has(key) ? {body:new ReadableStream({start(c) { c.enqueue(objects.get(key)); c.close(); }}), arrayBuffer:async () => objects.get(key)!.buffer} : null }, OPENAI_API_KEY:'', IMAGE_MODEL:'gpt-image-2.5-flare' };
-const request = (path:string, method='GET', body?:unknown, owner='a@example.com') => new Request(`https://studio.example${path}`, { method, headers:{'oai-authenticated-user-email':owner, ...(body ? {'content-type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined });
+const request = (path:string, method='GET', body?:unknown, owner='a@example.com') => new Request(`https://studio.example${path}`, { method, headers:{cookie:cookies.get(owner) ?? '', ...(body ? {'content-type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined });
 const json = async (response: Response) => response.json() as Promise<any>;
+
+before(async () => {
+  for (const email of ['a@example.com','b@example.com','library@example.com','foreign-library@example.com']) {
+    const response=await handleApiRequest(apiRequest('/api/auth/register','POST',{email,password:'test password 123'}),env);
+    assert.equal(response.status,201);
+    cookies.set(email,response.headers.get('set-cookie')!.split(';')[0]);
+  }
+});
 
 test('API initializes missing tables and index idempotently', async () => {
   const first = await handleApiRequest(request('/api/projects'),env);
@@ -45,16 +28,16 @@ test('API initializes missing tables and index idempotently', async () => {
   const projects=(await json(first)).projects;
   assert.equal(projects.length,1);
   assert.equal(projects[0].id,'sample-summer-letter');
-  assert.equal(db.schema.size,3);
+  assert.equal(db.sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().length,5);
   const again = await handleApiRequest(request('/api/projects'),env);
   assert.equal(again.status,200);
-  assert.equal(db.schema.size,3);
+  assert.equal(db.sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().length,5);
 });
 
 const samplePath = '/api/projects/sample-summer-letter';
 
 test('browsing the canonical sample is stable and does not create saved projects', async () => {
-  const before = db.projects.size;
+  const before = db.count('projects');
   const response = await handleApiRequest(request(samplePath),env);
   assert.equal(response.status,200);
   const sample = (await json(response)).project;
@@ -65,18 +48,18 @@ test('browsing the canonical sample is stable and does not create saved projects
   const other = await handleApiRequest(request(samplePath,'GET',undefined,'b@example.com'),env);
   assert.equal(other.status,200);
   assert.deepEqual((await json(other)).project,sample);
-  assert.equal(db.projects.size,before);
+  assert.equal(db.count('projects'),before);
   const list = (await json(await handleApiRequest(request('/api/projects'),env))).projects;
   const listedSample = list.filter((p:any)=>p.id===sample.id);
   assert.equal(listedSample.length,1);
   assert.equal(listedSample[0].name,'夏日来信 · 样例');
   assert.equal(listedSample[0].shotCount,12);
-  assert.equal(db.projects.size,before,'listing the sample must not persist it');
+  assert.equal(db.count('projects'),before,'listing the sample must not persist it');
 });
 
 test('sample rejects saving, deletion and generation without touching data or provider', async () => {
-  const before = structuredClone([...db.projects]);
-  const assetsBefore = db.assets.size;
+  const before = db.sqlite.prepare('SELECT * FROM projects ORDER BY id').all();
+  const assetsBefore = db.count('assets');
   let called = false;
   const options = {fetcher:async()=>{called=true;throw new Error('sample must not generate');}};
   for (const owner of ['a@example.com','b@example.com']) {
@@ -91,8 +74,8 @@ test('sample rejects saving, deletion and generation without touching data or pr
     }
   }
   assert.equal(called,false);
-  assert.equal(db.assets.size,assetsBefore);
-  assert.deepEqual([...db.projects],before);
+  assert.equal(db.count('assets'),assetsBefore);
+  assert.deepEqual(db.sqlite.prepare('SELECT * FROM projects ORDER BY id').all(),before);
 });
 
 test('explicit sample copies are editable and owner scoped while the original stays unchanged', async () => {
@@ -255,13 +238,13 @@ test('invalid project documents return a client error', async () => {
 test('upload validates magic bytes and owner gates retrieval', async () => {
   const form = new FormData();
   form.set('file', new File([new Uint8Array([137,80,78,71,13,10,26,10,0])], 'ref.png', {type:'image/png'}));
-  const uploaded = await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:form}),env));
+  const uploaded = await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{cookie:cookies.get('a@example.com')!},body:form}),env));
   assert.match(uploaded.image.url, /^\/api\/assets\//);
   assert.equal((await handleApiRequest(request(uploaded.image.url),env)).status, 200);
   assert.equal((await handleApiRequest(request(uploaded.image.url,'GET',undefined,'b@example.com'),env)).status, 404);
   const bad = new FormData();
   bad.set('file', new File(['hello'], 'bad.png', {type:'image/png'}));
-  assert.equal((await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:bad}),env)).status, 400);
+  assert.equal((await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{cookie:cookies.get('a@example.com')!},body:bad}),env)).status, 400);
   const foreign = (await json(await handleApiRequest(request('/api/projects','POST',{name:'Other'},'b@example.com'),env))).project;
   foreign.characters.push({id:'c',name:'C',description:'',references:[uploaded.image]});
   assert.equal((await handleApiRequest(request(`/api/projects/${foreign.id}`,'PUT',{project:foreign},'b@example.com'),env)).status,400);
@@ -271,7 +254,7 @@ test('generation failure persists retryable state without dropping selected cand
   env.OPENAI_API_KEY = 'test-key';
   const refForm = new FormData();
   refForm.set('file', new File([new Uint8Array([137,80,78,71,13,10,26,10,0])], 'ref.png', {type:'image/png'}));
-  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:refForm}),env))).image;
+  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{cookie:cookies.get('a@example.com')!},body:refForm}),env))).image;
   const p = (await json(await handleApiRequest(request('/api/projects','POST',{name:'Generate'}),env))).project;
   p.characters.push({id:'c',name:'C',description:'desc',references:[ref]});
   p.shots.push({id:'s',title:'S',characterIds:['c'],scene:'',description:'',dialogue:'',duration:5,candidates:[{id:'old',url:'/samples/summer.png',createdAt:'',prompt:'',batchId:'',source:'sample'}],selectedCandidateId:'old',status:'idle',error:null,generationId:null,generationStartedAt:null});
@@ -299,7 +282,7 @@ test('generation merges into the latest revision after another shot is edited', 
   const png = new Uint8Array([137,80,78,71,13,10,26,10,0]);
   const form = new FormData();
   form.set('file', new File([png], 'reference.png', {type:'image/png'}));
-  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:form}),env))).image;
+  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{cookie:cookies.get('a@example.com')!},body:form}),env))).image;
   const p = (await json(await handleApiRequest(request('/api/projects','POST',{name:'Concurrent'}),env))).project;
   p.characters.push({id:'c',name:'Lin',description:'blue hair',references:[ref]});
   const baseShot = (id:string) => ({id,title:id,characterIds:id==='a'?['c']:[],scene:'',description:'',dialogue:'',duration:5,candidates:[],selectedCandidateId:null,status:'idle',error:null,generationId:null,generationStartedAt:null});
@@ -338,7 +321,7 @@ test('stale generating state becomes retryable on reload', async () => {
   saved.shots[0].status='generating';
   saved.shots[0].generationId='lost-job';
   saved.shots[0].generationStartedAt='2020-01-01T00:00:00.000Z';
-  db.projects.get(p.id).document=JSON.stringify(saved);
+  db.sqlite.prepare('UPDATE projects SET document = ? WHERE id = ?').run(JSON.stringify(saved),p.id);
   const reloaded=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.equal(reloaded.shots[0].status,'failed');
   assert.match(reloaded.shots[0].error,/重试/);
@@ -359,33 +342,20 @@ test('a shot without associated characters uses text-only generation', async () 
   env.OPENAI_API_KEY='';
 });
 
-test('explicit LAN mode shares the existing local workspace and keeps samples readonly', async () => {
-  const localEnv = {...env,JINGTOU_LOCAL_WORKSPACE:'1'};
-  const createLocal = new Request('http://localhost:3000/api/projects', {
-    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'LAN shared project'}),
-  });
-  const created = (await json(await handleApiRequest(createLocal,env))).project;
-  const url = `http://192.168.1.112:3000/api/projects/${created.id}`;
-  const response = await handleApiRequest(new Request(url),localEnv);
-  assert.equal(response.status,200);
-  const project = (await json(response)).project;
-  assert.deepEqual(project,created);
-  project.name = 'Edited from LAN';
-  const saved = await handleApiRequest(new Request(url,{
-    method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project}),
-  }),localEnv);
-  assert.equal(saved.status,200);
-  const local = await handleApiRequest(new Request(`http://localhost:3000/api/projects/${created.id}`),env);
-  assert.equal((await json(local)).project.name,'Edited from LAN');
-  // A forwarded identity cannot switch workspaces when sharing is explicitly enabled.
-  const list = await handleApiRequest(new Request('http://192.168.1.112:3000/api/projects',{
-    headers:{'oai-authenticated-user-email':'someone@example.com'},
-  }),localEnv);
-  assert.ok((await json(list)).projects.some((p:any)=>p.id===created.id));
-  assert.equal((await handleApiRequest(new Request(`http://192.168.1.112:3000${samplePath}`),localEnv)).status,200);
-  assert.equal((await handleApiRequest(new Request(`http://192.168.1.112:3000${samplePath}`,{method:'DELETE'}),localEnv)).status,403);
-  assert.equal((await handleApiRequest(request(`/api/projects/${created.id}`),env)).status,404);
-  assert.equal((await handleApiRequest(new Request(url,{method:'DELETE'}),localEnv)).status,200);
+test('LAN requests require a session and preserve account ownership and readonly samples', async () => {
+  const origin='http://192.168.1.112:3000';
+  const cookie=cookies.get('a@example.com')!;
+  const created=(await json(await handleApiRequest(apiRequest('/api/projects','POST',{name:'LAN private project'},cookie,origin),env))).project;
+  const path=`/api/projects/${created.id}`;
+  assert.equal((await handleApiRequest(apiRequest(path,'GET',undefined,'',origin),env)).status,401);
+  assert.equal((await handleApiRequest(apiRequest(path,'GET',undefined,cookies.get('b@example.com')!,origin),env)).status,404);
+  const project=(await json(await handleApiRequest(apiRequest(path,'GET',undefined,cookie,origin),env))).project;
+  project.name='Edited from LAN';
+  assert.equal((await handleApiRequest(apiRequest(path,'PUT',{project},cookie,origin),env)).status,200);
+  assert.equal((await json(await handleApiRequest(request(path),env))).project.name,'Edited from LAN');
+  assert.equal((await handleApiRequest(apiRequest(samplePath,'GET',undefined,cookie,origin),env)).status,200);
+  assert.equal((await handleApiRequest(apiRequest(samplePath,'DELETE',undefined,cookie,origin),env)).status,403);
+  assert.equal((await handleApiRequest(apiRequest(path,'DELETE',undefined,cookie,origin),env)).status,200);
 });
 
 test('private addresses and client flags do not bypass identity checks outside LAN mode', async () => {
@@ -412,7 +382,7 @@ async function sceneProject() {
 test('old project documents gain an empty scene library on reload', async () => {
   const p = await sceneProject();
   delete p.scenes;
-  db.projects.get(p.id).document = JSON.stringify(p);
+  db.sqlite.prepare('UPDATE projects SET document = ? WHERE id = ?').run(JSON.stringify(p),p.id);
   const reloaded = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.deepEqual(reloaded.scenes,[]);
 });
@@ -460,7 +430,7 @@ test('shot generation sends selected scene bytes after character images', async 
   const form = new FormData();
   const characterPng = new Uint8Array([137,80,78,71,13,10,26,10,2]);
   form.set('file',new File([characterPng],'character.png',{type:'image/png'}));
-  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{'oai-authenticated-user-email':'a@example.com'},body:form}),env))).image;
+  const ref = (await json(await handleApiRequest(new Request('https://studio.example/api/upload',{method:'POST',headers:{cookie:cookies.get('a@example.com')!},body:form}),env))).image;
   p.characters = [{id:'c',name:'角色',description:'短发',references:[ref]}];
   p.shots[0].sceneId = p.scenes[0].id;
   p.shots[0].characterIds = ['c'];
@@ -540,7 +510,7 @@ test('stale scene generation recovers and readonly sample rejects scene generati
   p.scenes[0].status = 'generating';
   p.scenes[0].generationId = 'lost';
   p.scenes[0].generationStartedAt = '2020-01-01T00:00:00.000Z';
-  db.projects.get(p.id).document = JSON.stringify(p);
+  db.sqlite.prepare('UPDATE projects SET document = ? WHERE id = ?').run(JSON.stringify(p),p.id);
   const recovered = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.equal(recovered.scenes[0].status,'failed');
   assert.equal(recovered.scenes[0].generationId,null);

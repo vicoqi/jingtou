@@ -34,8 +34,7 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async ({ command }) => {
-  const shareLocalWorkspace = command === 'serve' && process.env.JINGTOU_LAN === '1';
+export default defineConfig(async () => {
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -56,8 +55,6 @@ export default defineConfig(async ({ command }) => {
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: {
           ...localBindingConfig,
-          // Exclude the shared development identity from production builds.
-          vars: shareLocalWorkspace ? { JINGTOU_LOCAL_WORKSPACE: '1' } : {},
         },
       }),
     ],

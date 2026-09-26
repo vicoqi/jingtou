@@ -1,3 +1,4 @@
+export type AuthUser = { id: string; email: string };
 export type ReferenceImage = { id: string; url: string; name: string };
 export type Character = { id: string; name: string; description: string; references: ReferenceImage[] };
 export type Candidate = { id: string; url: string; createdAt: string; prompt: string; batchId: string; source: 'generated' | 'uploaded' | 'sample' };

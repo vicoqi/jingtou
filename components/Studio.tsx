@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import Link from 'next/link';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronRight, Clapperboard, Clock3, CloudCheck, Copy, Film, FolderOpen, House, ImagePlus, Images, LayoutGrid, List, LoaderCircle, LockKeyhole, Maximize2, Menu, MessageSquare, Mountain, Plus, RotateCcw, Settings2, Sparkles, Trash2, Upload, UsersRound, WandSparkles, X, Play, AlertCircle } from 'lucide-react';
-import type { Candidate, Project, ProjectSummary, Shot } from '../lib/types';
+import { LogOut } from 'lucide-react';
+import type { AuthUser, Candidate, Project, ProjectSummary, Shot } from '../lib/types';
 import { newShot } from '../lib/domain';
 import { projectsLocation, resourceLibraryLocation, workspaceViewFromLocation, type ProjectSection } from '../lib/navigation';
 import { canDeleteProject } from '../lib/project-access';
@@ -27,7 +28,7 @@ function updatedLabel(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新' : `${date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}更新`;
 }
 
-export function Studio() {
+export function Studio({user,onLogout}:{user:AuthUser;onLogout:()=>Promise<void>}) {
   const studio = useStudio();
   const { project, update, busy, readOnly } = studio;
   const [page, setPage] = useState<ProjectSection | 'projects'>('shots');
@@ -42,6 +43,7 @@ export function Studio() {
   const [uploading, setUploading] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [deletingProject, setDeletingProject] = useState<ProjectSummary | null>(null);
+  const [loggingOut,setLoggingOut]=useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
   const dragId = useRef<string | null>(null);
   const shot = project?.shots.find(s => s.id === activeId) || project?.shots[0];
@@ -49,7 +51,7 @@ export function Studio() {
   const selected = shot ? picture(shot) : undefined;
   const total = project?.shots.reduce((n, s) => n + s.duration, 0) ?? 0;
   const selectedCount = project?.shots.filter(s => s.selectedCandidateId).length ?? 0;
-  const disabled = busy || uploading;
+  const disabled = busy || uploading || loggingOut;
   const editingDisabled = disabled || readOnly;
   const patchShot = (patch: Partial<Shot>) => { if (shot && !editingDisabled) update(p => ({ ...p, shots: p.shots.map(s => s.id === shot.id ? { ...s, ...patch } : s) })); };
   function addShot() {
@@ -86,6 +88,12 @@ export function Studio() {
     setPage(target); setMobileNav(false); void studio.refreshLibrary();
   };
   const openCreate = () => { setNewName(''); setNewStyle(DEFAULT_PROJECT_STYLE); setModal('create'); };
+  const logout=async ()=>{
+    setLoggingOut(true);
+    try { await studio.flush(); await onLogout(); }
+    catch (e) { studio.setError(e instanceof Error ? e.message : '退出失败，请重试。'); }
+    finally { setLoggingOut(false); }
+  };
   const status = studio.saveState === '保存失败' ? 'error' : studio.saveState === '已保存' ? 'saved' : 'saving';
   useEffect(() => {
     const syncPage = () => {
@@ -105,7 +113,7 @@ export function Studio() {
       <button className={`nav-item ${!project && page === 'scenes' ? 'active' : ''}`} disabled={uploading} onClick={() => void goResourceLibrary('scenes')}><Mountain size={18} />场景生成<span className="nav-count">{studio.library.scenes.length}</span></button>
       <div className="sidebar-divider" />
       <button className="new-project-button" disabled={disabled} onClick={openCreate}><Plus size={16} />新建作品</button>
-      <div className="sidebar-bottom"><div className="studio-tip"><span className="tip-spark">✦</span><strong>每一个好故事<br />都始于一个镜头。</strong><span>让想象，成为画面。</span></div><button className="nav-item settings-link" onClick={() => setModal('settings')}><Settings2 size={17} />生图服务设置<span className={`connection-dot ${studio.config.configured ? 'connected' : ''}`} /></button><div className="user-profile"><div className="avatar">创</div><div><strong>独立创作者</strong><span>个人工作空间</span></div><span className="version">V 0.1</span></div></div>
+      <div className="sidebar-bottom"><div className="studio-tip"><span className="tip-spark">✦</span><strong>每一个好故事<br />都始于一个镜头。</strong><span>让想象，成为画面。</span></div><button className="nav-item settings-link" onClick={() => setModal('settings')}><Settings2 size={17} />生图服务设置<span className={`connection-dot ${studio.config.configured ? 'connected' : ''}`} /></button><div className="user-profile"><div className="avatar">{user.email[0].toUpperCase()}</div><div className="account-details"><strong title={user.email}>{user.email}</strong><span>个人工作空间</span></div><button className="icon-button account-logout" disabled={disabled} onClick={() => void logout()} aria-label="退出登录" title="退出登录">{loggingOut ? <LoaderCircle size={16} className="spin" /> : <LogOut size={16} />}</button></div></div>
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="收起导航" onClick={() => setMobileNav(false)} />}
     <main className="main-shell">

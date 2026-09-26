@@ -2,17 +2,16 @@ import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, 
 import { mergeGeneration, summarizeProject, validateProject } from './domain.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
+import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
+import { ApiError, bodyJson, checkRequestOrigin, fail, json } from './http.ts';
 import type { Candidate, GeneratedFrame, GenerationKind, Project, ResourceLibrary } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
 type Bucket = { put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null> };
-export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string; JINGTOU_LOCAL_WORKSPACE?:string };
+export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
 type AssetRow = { id:string; owner:string; mime:string; name:string };
-class ApiError extends Error { status:number; constructor(status:number, message:string) { super(message); this.status=status; } }
-const json = (data: unknown, status = 200): Response => new Response(JSON.stringify(data), {status, headers:{'content-type':'application/json; charset=utf-8', 'cache-control':'no-store'}});
-function fail(status:number, message:string): never { throw new ApiError(status,message); }
 const uuidPath = /^\/api\/assets\/([a-f0-9-]{36})$/;
 const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
 const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
@@ -21,30 +20,11 @@ const schemaStatements = [
   'CREATE TABLE IF NOT EXISTS assets (id text PRIMARY KEY NOT NULL, owner text NOT NULL, mime text NOT NULL, name text NOT NULL)',
   'CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, owner text NOT NULL, revision integer NOT NULL, document text NOT NULL, updated_at text NOT NULL)',
   'CREATE INDEX IF NOT EXISTS projects_owner_updated_idx ON projects (owner, updated_at)',
+  ...authSchemaStatements,
 ];
 
 async function ensureSchema(env: ApiEnv): Promise<void> {
   for (const sql of schemaStatements) await env.DB.prepare(sql).bind().run();
-}
-
-function ownerOf(request:Request,env:ApiEnv): string {
-  // Only dev:lan injects this binding. Never trust a request header for LAN mode.
-  if (env.JINGTOU_LOCAL_WORKSPACE === '1') return 'local-development';
-  const hostname = new URL(request.url).hostname;
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') return 'local-development';
-  const email = request.headers.get('oai-authenticated-user-email')?.trim().toLowerCase();
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(401,'Sign in to continue');
-  return email;
-}
-
-async function bodyJson(request:Request):Promise<Record<string, unknown>> {
-  if (Number(request.headers.get('content-length') || 0) > 2_000_000) fail(413,'Request too large');
-  const raw = await request.text();
-  if (raw.length > 2_000_000) fail(413,'Request too large');
-  let value: unknown;
-  try { value = JSON.parse(raw); } catch { return fail(400,'Invalid JSON'); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400,'Expected a JSON object');
-  return value as Record<string, unknown>;
 }
 
 async function rowFor(env:ApiEnv,id:string,owner:string):Promise<ProjectRow> {
@@ -188,9 +168,11 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
 
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
-    const owner=ownerOf(request,env);
+    checkRequestOrigin(request);
     const path=new URL(request.url).pathname;
     await ensureSchema(env);
+    if (path.startsWith('/api/auth/')) return await handleAuth(request,env);
+    const owner=(await requireUser(request,env)).id;
     if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || ''});
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
@@ -246,7 +228,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       if (!asset || asset.owner!==owner) fail(404,'Image not found');
       const object=await env.ASSETS_BUCKET.get(asset.id);
       if (!object) fail(404,'Image file not found');
-      return new Response(object.body,{headers:{'content-type':asset.mime,'cache-control':'private, max-age=3600','x-content-type-options':'nosniff'}});
+      return new Response(object.body,{headers:{'content-type':asset.mime,'cache-control':'private, no-store','x-content-type-options':'nosniff'}});
     }
     if (path==='/api/upload' && request.method==='POST') {
       if (Number(request.headers.get('content-length') || 0)>10*1024*1024+10000) fail(413,'Image is too large');

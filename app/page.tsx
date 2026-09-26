@@ -1,2 +1,2 @@
-import { Studio } from '../components/Studio';
-export default function Home() { return <Studio />; }
+import { AuthGate } from '../components/AuthGate';
+export default function Home() { return <AuthGate />; }
