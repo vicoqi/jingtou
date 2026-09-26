@@ -41,7 +41,9 @@ try {
   assert.equal((await request('/api/auth/me')).user.email,alice.email);
   const config=await request('/api/config');
   assert.equal(typeof config.speech.configured,'boolean');
-  assert.equal(config.speech.provider,'Azure Speech');
+  assert.equal(config.speech.id,'qwen');
+  assert.equal(typeof config.speech.provider,'string');
+  assert.equal(typeof config.speech.model,'string');
   assert.deepEqual(config.speech.voices,{female:'女声',male:'男声'});
   const page = await fetchSigned(origin);
   assert.equal(page.status, 200);

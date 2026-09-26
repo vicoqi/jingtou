@@ -1,6 +1,6 @@
 import { buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
 import { mergeGeneration, normalizeProject, summarizeProject, validateProject } from './domain.ts';
-import { requestAzureSpeech } from './speech.ts';
+import { createSpeechProvider, DEFAULT_QWEN_TTS_MODEL, type SpeechProvider } from './speech.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
@@ -10,7 +10,19 @@ import type { Candidate, GeneratedFrame, GenerationKind, Project, ResourceLibrar
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
 type Bucket = { put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null> };
-export type ApiEnv = { DB:D1; ASSETS_BUCKET:Bucket; ASSETS?:{fetch(request:Request):Promise<Response>}; OPENAI_API_KEY?:string; IMAGE_API_KEY?:string; IMAGE_API_BASE_URL?:string; IMAGE_MODEL?:string; AZURE_SPEECH_KEY?:string; AZURE_SPEECH_REGION?:string };
+export type ApiEnv = {
+  DB:D1;
+  ASSETS_BUCKET:Bucket;
+  ASSETS?:{fetch(request:Request):Promise<Response>};
+  OPENAI_API_KEY?:string;
+  IMAGE_API_KEY?:string;
+  IMAGE_API_BASE_URL?:string;
+  IMAGE_MODEL?:string;
+  DASHSCOPE_API_KEY?:string;
+  QWEN_TTS_MODEL?:string;
+  QWEN_TTS_FEMALE_VOICE?:string;
+  QWEN_TTS_MALE_VOICE?:string;
+};
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
 type AssetRow = { id:string; owner:string; mime:string; name:string };
 const uuidPath = /^\/api\/assets\/([a-f0-9-]{36})$/;
@@ -24,6 +36,24 @@ const schemaStatements = [
   'CREATE INDEX IF NOT EXISTS projects_owner_updated_idx ON projects (owner, updated_at)',
   ...authSchemaStatements,
 ];
+
+type SpeechRuntime = {
+  public:{configured:boolean;id:'qwen';provider:string;model:string;voices:{female:'女声';male:'男声'}};
+  provider:SpeechProvider | null;
+};
+
+function resolveSpeechProvider(env:ApiEnv):SpeechRuntime {
+  const qwenKey=env.DASHSCOPE_API_KEY?.trim();
+  const model=env.QWEN_TTS_MODEL?.trim() || DEFAULT_QWEN_TTS_MODEL;
+  const configured=!!qwenKey;
+  const voices:{female?:string;male?:string}={};
+  if (env.QWEN_TTS_FEMALE_VOICE?.trim()) voices.female=env.QWEN_TTS_FEMALE_VOICE.trim();
+  if (env.QWEN_TTS_MALE_VOICE?.trim()) voices.male=env.QWEN_TTS_MALE_VOICE.trim();
+  return {
+    public:{configured,id:'qwen',provider:'阿里云百炼',model,voices:{female:'女声',male:'男声'}},
+    provider:configured ? createSpeechProvider({id:'qwen',key:qwenKey!,model,voices}) : null,
+  };
+}
 
 async function ensureSchema(env: ApiEnv): Promise<void> {
   for (const sql of schemaStatements) await env.DB.prepare(sql).bind().run();
@@ -195,16 +225,16 @@ async function audioGenerationResult(env:ApiEnv,owner:string,id:string,shotId:st
 async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
   const body=await bodyJson(request);
   if (typeof body.shotId!=='string') fail(400,'请选择需要生成配音的镜头。');
-  const key=env.AZURE_SPEECH_KEY?.trim();
-  const region=env.AZURE_SPEECH_REGION?.trim();
-  if (!key || !region) fail(503,'请配置 Azure Speech 密钥和区域');
+  const speech=resolveSpeechProvider(env);
+  const provider=speech.provider;
+  if (!provider) fail(503,'请配置百炼 API Key');
   const current=await loadRecovered(env,id,owner);
   const shot=current.shots.find(item=>item.id===body.shotId);
   if (!shot) fail(404,'镜头不存在。');
   if (shot.audio.status==='generating') fail(409,'配音正在生成，请稍候。');
   const sourceText=shot.dialogue.trim();
   if (!sourceText) fail(400,'请先填写镜头对白。');
-  if (sourceText.length>1000) fail(400,'单个镜头对白不能超过 1000 个字符。');
+  if (sourceText.length>600) fail(400,'单个镜头对白不能超过 600 个字符。');
   const speaker=shot.speakerCharacterId ? current.characters.find(character=>character.id===shot.speakerCharacterId) : null;
   if (!speaker || !shot.characterIds.includes(speaker.id)) fail(400,'请从出场角色中选择说话角色。');
   const sourceVoice=speaker.voice;
@@ -214,7 +244,7 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
   if (!startedSaved) fail(409,'Project changed; reload and retry');
   const generation=(async ():Promise<Project>=>{
     try {
-      const output=await requestAzureSpeech({key,region,gender:sourceVoice,text:sourceText,fetcher});
+      const output=await provider.synthesize({gender:sourceVoice,text:sourceText,fetcher});
       const assetId=crypto.randomUUID();
       await env.ASSETS_BUCKET.put(assetId,output.bytes,{httpMetadata:{contentType:output.mime}});
       await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,output.mime,`${shot.title || '镜头配音'}.wav`.slice(0,200)).run();
@@ -242,7 +272,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
     const owner=(await requireUser(request,env)).id;
-    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:{configured:!!(env.AZURE_SPEECH_KEY?.trim() && env.AZURE_SPEECH_REGION?.trim()),provider:'Azure Speech',voices:{female:'女声',male:'男声'}}});
+    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public});
     if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-audio`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }

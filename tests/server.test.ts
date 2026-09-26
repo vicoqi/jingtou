@@ -26,6 +26,24 @@ function speechWav(seconds=1):Uint8Array {
   return bytes;
 }
 
+const qwenSpeechEnv = () => ({
+  ...env,
+  DASHSCOPE_API_KEY:'dashscope-key',
+  QWEN_TTS_MODEL:'qwen3-tts-flash',
+});
+
+function qwenSuccessFetcher(seconds=1,wait?:Promise<void>):typeof fetch {
+  let calls=0;
+  return async () => {
+    calls++;
+    if (calls===1) {
+      await wait;
+      return Response.json({output:{finish_reason:'stop',audio:{url:'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio/result.wav'}}});
+    }
+    return new Response(speechWav(seconds).buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
+  };
+}
+
 before(async () => {
   for (const email of ['a@example.com','b@example.com','library@example.com','foreign-library@example.com']) {
     const response=await handleApiRequest(apiRequest('/api/auth/register','POST',{email,password:'test password 123'}),env);
@@ -128,6 +146,7 @@ test('generation configuration requires both a key and an explicit model', async
   const before=(await json(await handleApiRequest(request('/api/config'),env)));
   assert.equal(before.configured,false);
   assert.equal(before.speech.configured,false);
+  assert.deepEqual(before.speech,{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-flash',voices:{female:'女声',male:'男声'}});
   env.OPENAI_API_KEY='test-key';
   env.IMAGE_MODEL='';
   const missing=(await json(await handleApiRequest(request('/api/config'),env)));
@@ -141,36 +160,43 @@ test('generation configuration requires both a key and an explicit model', async
   env.IMAGE_MODEL='gpt-image-2.5-flare';
 });
 
-test('audio generation uses the speaking character voice and saves private WAV bytes', async () => {
-  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'配音测试'}),env))).project;
-  p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
-  p.shots=[{...newShot(),id:'line',title:'对白',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'你 & 我一起去看海。'}];
+test('Qwen3 speech uses the official MaaS endpoint and persists private WAV bytes', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'百炼配音'}),env))).project;
+  p.characters=[{id:'speaker',name:'陈屿',description:'',voice:'male',references:[]}];
+  p.shots=[{...newShot(),id:'qwen-line',title:'百炼对白',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'等风来，我们就出发。'}];
   const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env))).project;
-  const speechEnv={...env,AZURE_SPEECH_KEY:'speech-key',AZURE_SPEECH_REGION:'eastasia'};
+  const speechEnv={
+    ...qwenSpeechEnv(),
+    QWEN_TTS_MALE_VOICE:'Moon',
+  };
   const config=await json(await handleApiRequest(request('/api/config'),speechEnv));
-  assert.equal(config.speech.configured,true);
-  assert.deepEqual(config.speech.voices,{female:'女声',male:'男声'});
+  assert.deepEqual(config.speech,{configured:true,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-flash',voices:{female:'女声',male:'男声'}});
   let calls=0;
-  const response=await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:async (url,init)=>{
+  const response=await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'qwen-line'}),speechEnv,{fetcher:async (url,init)=>{
     calls++;
-    assert.equal(String(url),'https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1');
-    assert.match(String(init?.body),/zh-CN-XiaoxiaoNeural/);
-    assert.match(String(init?.body),/你 &amp; 我一起去看海。/);
-    return new Response(speechWav().buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
+    if (calls===1) {
+      assert.equal(String(url),'https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation');
+      assert.equal(new Headers(init?.headers).get('Authorization'),'Bearer dashscope-key');
+      const body=JSON.parse(String(init?.body));
+      assert.deepEqual(body,{model:'qwen3-tts-flash',input:{text:'等风来，我们就出发。',voice:'Moon',language_type:'Chinese'}});
+      return Response.json({output:{finish_reason:'stop',audio:{url:'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio/result.wav'}}});
+    }
+    assert.equal(String(url),'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio/result.wav');
+    return new Response(speechWav(0.75).buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
   }});
   assert.equal(response.status,200,await response.clone().text());
-  assert.equal(calls,1);
+  assert.equal(calls,2);
   const generated=(await json(response)).project;
   assert.equal(generated.revision,saved.revision + 2);
   assert.equal(generated.shots[0].audio.status,'idle');
-  assert.equal(generated.shots[0].audio.duration,1);
-  assert.equal(generated.shots[0].audio.sourceText,'你 & 我一起去看海。');
-  assert.equal(generated.shots[0].audio.sourceVoice,'female');
+  assert.equal(generated.shots[0].audio.duration,0.75);
+  assert.equal(generated.shots[0].audio.sourceText,'等风来，我们就出发。');
+  assert.equal(generated.shots[0].audio.sourceVoice,'male');
   assert.match(generated.shots[0].audio.url,/^\/api\/assets\//);
   const audio=await handleApiRequest(request(generated.shots[0].audio.url),speechEnv);
   assert.equal(audio.status,200);
   assert.equal(audio.headers.get('content-type'),'audio/wav');
-  assert.deepEqual(new Uint8Array(await audio.arrayBuffer()),speechWav());
+  assert.deepEqual(new Uint8Array(await audio.arrayBuffer()),speechWav(0.75));
   assert.equal((await handleApiRequest(request(generated.shots[0].audio.url,'GET',undefined,'b@example.com'),speechEnv)).status,404);
 });
 
@@ -182,7 +208,7 @@ test('audio generation validates configuration, dialogue and speaking character 
   let called=false;
   const fetcher=async()=>{called=true;return new Response(speechWav().buffer as ArrayBuffer);};
   assert.equal((await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),env,{fetcher})).status,503);
-  const configured={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const configured=qwenSpeechEnv();
   const loaded=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),configured))).project;
   loaded.shots[0].dialogue='   ';
   await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:loaded}),configured);
@@ -196,12 +222,12 @@ test('audio generation validates configuration, dialogue and speaking character 
 });
 
 test('failed audio regeneration keeps the previous recording and becomes retryable', async () => {
-  const speechEnv={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const speechEnv=qwenSpeechEnv();
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'配音重试'}),speechEnv))).project;
   p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
   p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'第一版对白'}];
   await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),speechEnv);
-  const first=(await json(await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:async()=>new Response(speechWav().buffer as ArrayBuffer)}))).project;
+  const first=(await json(await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:qwenSuccessFetcher()}))).project;
   const original=first.shots[0].audio;
   first.shots[0].dialogue='第二版对白';
   const edited=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:first}),speechEnv))).project;
@@ -216,7 +242,7 @@ test('failed audio regeneration keeps the previous recording and becomes retryab
 });
 
 test('audio generation merges into the latest edit while retaining its source snapshot', async () => {
-  const speechEnv={...env,AZURE_SPEECH_KEY:'key',AZURE_SPEECH_REGION:'eastasia'};
+  const speechEnv=qwenSpeechEnv();
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'并发配音'}),speechEnv))).project;
   p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
   p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'生成前的对白'}];
@@ -227,7 +253,7 @@ test('audio generation merges into the latest edit while retaining its source sn
   const ready=new Promise<void>(resolve=>{registered=resolve;});
   let background:Promise<unknown> | undefined;
   const pending=handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{
-    fetcher:async()=>{await gate;return new Response(speechWav().buffer as ArrayBuffer);},
+    fetcher:qwenSuccessFetcher(1,gate),
     waitUntil:promise=>{background=promise;registered();},
   });
   await Promise.race([ready,pending]);

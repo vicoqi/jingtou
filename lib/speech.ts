@@ -1,79 +1,143 @@
 import type { VoiceGender } from './types.ts';
 
-export const AZURE_VOICES = {
-  female: 'zh-CN-XiaoxiaoNeural',
-  male: 'zh-CN-YunxiNeural',
+export const QWEN_VOICES = {
+  female: 'Momo',
+  male: 'Moon',
 } as const satisfies Record<VoiceGender,string>;
 
-const MAX_TEXT_LENGTH = 1_000;
+export const DEFAULT_QWEN_TTS_MODEL = 'qwen3-tts-flash';
+
+export type SpeechOutput = {bytes:Uint8Array;mime:'audio/wav';duration:number};
+export type SpeechSynthesisInput = {gender:VoiceGender;text:string;fetcher?:typeof fetch};
+export type SpeechProvider = {
+  id:'qwen';
+  label:string;
+  model:string;
+  voices:Record<VoiceGender,string>;
+  synthesize(input:SpeechSynthesisInput):Promise<SpeechOutput>;
+};
+export type SpeechProviderConfig = {id:'qwen';key:string;model?:string;voices?:Partial<Record<VoiceGender,string>>};
+
+const MAX_TEXT_LENGTH = 600;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 
-function escapeXml(value:string):string {
-  return value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
-}
-
-export function buildSpeechSsml(text:string,gender:VoiceGender):string {
+function validateSpeechText(text:string):string {
   const cleaned=text.trim();
   if (!cleaned) throw new Error('Speech text is required');
   if (cleaned.length > MAX_TEXT_LENGTH) throw new Error(`Speech text must be ${MAX_TEXT_LENGTH} characters or fewer`);
-  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN"><voice name="${AZURE_VOICES[gender]}">${escapeXml(cleaned)}</voice></speak>`;
+  return cleaned;
 }
 
 function chunkName(bytes:Uint8Array,offset:number):string {
   return String.fromCharCode(bytes[offset],bytes[offset + 1],bytes[offset + 2],bytes[offset + 3]);
 }
 
-export function detectWavDuration(bytes:Uint8Array):number {
+type WavAnalysis = {duration:number;streamingDataSizeOffset:number | null;actualDataSize:number | null};
+
+function analyzeWav(bytes:Uint8Array):WavAnalysis {
   if (bytes.byteLength < 12 || chunkName(bytes,0) !== 'RIFF' || chunkName(bytes,8) !== 'WAVE') throw new Error('Invalid WAV response');
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const streamingRiff=view.getUint32(4,true)===0x7fffffbf;
   let byteRate:number | null=null;
   let dataSize:number | null=null;
+  let streamingDataSizeOffset:number | null=null;
   for (let offset=12;offset + 8 <= bytes.byteLength;) {
     const name=chunkName(bytes,offset);
     const size=view.getUint32(offset + 4,true);
     const dataOffset=offset + 8;
-    if (dataOffset + size > bytes.byteLength) throw new Error('Invalid WAV response');
+    const streamingData=name==='data' && streamingRiff && size===0x7fffff9b && dataOffset<bytes.byteLength;
+    if (dataOffset + size > bytes.byteLength && !streamingData) throw new Error('Invalid WAV response');
     if (name === 'fmt ') {
       if (size < 16) throw new Error('Invalid WAV response');
       byteRate=view.getUint32(dataOffset + 8,true);
     } else if (name === 'data') {
-      dataSize=size;
+      dataSize=streamingData ? bytes.byteLength-dataOffset : size;
+      if (streamingData) streamingDataSizeOffset=offset + 4;
     }
+    if (streamingData) break;
     offset=dataOffset + size + (size % 2);
   }
   if (!byteRate || dataSize === null || dataSize <= 0) throw new Error('Invalid WAV response');
   const duration=dataSize / byteRate;
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('Invalid WAV response');
-  return duration;
+  return {duration,streamingDataSizeOffset,actualDataSize:dataSize};
 }
 
-type SpeechOptions = {
+export function detectWavDuration(bytes:Uint8Array):number {
+  return analyzeWav(bytes).duration;
+}
+
+function normalizeWav(bytes:Uint8Array):{bytes:Uint8Array;duration:number} {
+  const analysis=analyzeWav(bytes);
+  if (analysis.streamingDataSizeOffset===null || analysis.actualDataSize===null) return {bytes,duration:analysis.duration};
+  const normalized=bytes.slice();
+  const view=new DataView(normalized.buffer,normalized.byteOffset,normalized.byteLength);
+  view.setUint32(4,normalized.byteLength-8,true);
+  view.setUint32(analysis.streamingDataSizeOffset,analysis.actualDataSize,true);
+  return {bytes:normalized,duration:analysis.duration};
+}
+
+type QwenSpeechOptions = {
   key:string;
-  region:string;
+  model?:string;
+  voices?:Partial<Record<VoiceGender,string>>;
   gender:VoiceGender;
   text:string;
   fetcher?:typeof fetch;
 };
 
-export async function requestAzureSpeech(options:SpeechOptions):Promise<{bytes:Uint8Array;mime:'audio/wav';duration:number}> {
-  const region=options.region.trim();
-  if (!/^[a-z0-9-]+$/.test(region)) throw new Error('Invalid Azure Speech region');
-  if (!options.key) throw new Error('Azure Speech key is required');
-  const response=await (options.fetcher ?? fetch)(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`,{
+function qwenAudioDownloadUrl(value:unknown):string {
+  if (typeof value !== 'string') throw new Error('Speech provider returned an invalid audio URL');
+  let url:URL;
+  try { url=new URL(value); } catch { throw new Error('Speech provider returned an invalid audio URL'); }
+  const trustedHost=/^[a-z0-9][a-z0-9.-]*\.oss-cn-beijing\.aliyuncs\.com$/i.test(url.hostname);
+  if (!trustedHost || (url.protocol!=='http:' && url.protocol!=='https:') || url.username || url.password || url.port) {
+    throw new Error('Speech provider returned an invalid audio URL');
+  }
+  url.protocol='https:';
+  return url.toString();
+}
+
+function checkDeclaredAudioSize(response:Response):void {
+  const declaredSize=Number(response.headers.get('content-length') || 0);
+  if (declaredSize > MAX_AUDIO_BYTES) throw new Error('Speech provider response is too large');
+}
+
+export async function requestQwenSpeech(options:QwenSpeechOptions):Promise<SpeechOutput> {
+  if (!options.key) throw new Error('Qwen API key is required');
+  const model=options.model?.trim() || DEFAULT_QWEN_TTS_MODEL;
+  const voices={...QWEN_VOICES,...options.voices};
+  const text=validateSpeechText(options.text);
+  const fetcher=options.fetcher ?? fetch;
+  const response=await fetcher('https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation',{
     method:'POST',
-    headers:{
-      'Ocp-Apim-Subscription-Key':options.key,
-      'Content-Type':'application/ssml+xml',
-      'X-Microsoft-OutputFormat':'riff-24khz-16bit-mono-pcm',
-      'User-Agent':'JingtouStudio',
-    },
-    body:buildSpeechSsml(options.text,options.gender),
+    headers:{Authorization:`Bearer ${options.key}`,'Content-Type':'application/json'},
+    body:JSON.stringify({model,input:{text,voice:voices[options.gender],language_type:'Chinese'}}),
     signal:AbortSignal.timeout(60_000),
   });
   if (!response.ok) throw new Error(`Speech provider failed (${response.status})`);
-  const declaredSize=Number(response.headers.get('content-length') || 0);
-  if (declaredSize > MAX_AUDIO_BYTES) throw new Error('Speech provider response is too large');
-  const bytes=new Uint8Array(await response.arrayBuffer());
+  let payload:unknown;
+  try { payload=await response.json(); } catch { throw new Error('Speech provider returned an invalid response'); }
+  const output=typeof payload==='object' && payload!==null && 'output' in payload && typeof payload.output==='object' && payload.output!==null ? payload.output : null;
+  const audio=output && 'audio' in output && typeof output.audio==='object' && output.audio!==null ? output.audio : null;
+  const audioUrl=qwenAudioDownloadUrl(audio && 'url' in audio ? audio.url : undefined);
+  if (!output || !('finish_reason' in output) || output.finish_reason!=='stop') throw new Error('Speech provider returned an incomplete response');
+
+  const audioResponse=await fetcher(audioUrl,{method:'GET',redirect:'manual',signal:AbortSignal.timeout(60_000)});
+  if (!audioResponse.ok) throw new Error(`Speech audio download failed (${audioResponse.status})`);
+  checkDeclaredAudioSize(audioResponse);
+  const bytes=new Uint8Array(await audioResponse.arrayBuffer());
   if (bytes.byteLength > MAX_AUDIO_BYTES) throw new Error('Speech provider response is too large');
-  return {bytes,mime:'audio/wav',duration:detectWavDuration(bytes)};
+  const normalized=normalizeWav(bytes);
+  return {bytes:normalized.bytes,mime:'audio/wav',duration:normalized.duration};
+}
+
+export function createSpeechProvider(config:SpeechProviderConfig):SpeechProvider {
+  if (config.id!=='qwen') throw new Error('Unsupported speech provider');
+  const model=config.model?.trim() || DEFAULT_QWEN_TTS_MODEL;
+  const voices={...QWEN_VOICES,...config.voices};
+  return {
+    id:'qwen',label:'阿里云百炼',model,voices,
+    synthesize:input=>requestQwenSpeech({...input,key:config.key,model,voices}),
+  };
 }

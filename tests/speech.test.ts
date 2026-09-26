@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AZURE_VOICES, buildSpeechSsml, detectWavDuration, requestAzureSpeech } from '../lib/speech.ts';
+import {
+  QWEN_VOICES,
+  createSpeechProvider,
+  detectWavDuration,
+  requestQwenSpeech,
+} from '../lib/speech.ts';
 
 function wavFixture(sampleRate = 24_000, seconds = 1): Uint8Array {
   const channels = 1;
@@ -17,38 +22,81 @@ function wavFixture(sampleRate = 24_000, seconds = 1): Uint8Array {
   return bytes;
 }
 
-test('Azure request maps female and male voices and escapes dialogue', async () => {
-  let body = '';
-  const result = await requestAzureSpeech({
-    key:'key',region:'eastasia',gender:'female',text:'你 & 我 <一起>',
-    fetcher:async (url,init) => {
-      assert.equal(String(url),'https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1');
-      assert.equal(new Headers(init?.headers).get('Ocp-Apim-Subscription-Key'),'key');
-      assert.equal(new Headers(init?.headers).get('X-Microsoft-OutputFormat'),'riff-24khz-16bit-mono-pcm');
-      body=String(init?.body);
-      return new Response(wavFixture().buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
-    },
-  });
-  assert.match(body,new RegExp(AZURE_VOICES.female));
-  assert.match(body,/你 &amp; 我 &lt;一起&gt;/);
-  assert.equal(result.duration,1);
-  assert.equal(result.mime,'audio/wav');
-
-  assert.match(buildSpeechSsml('测试','male'),new RegExp(AZURE_VOICES.male));
-});
+function streamingWavFixture(sampleRate = 24_000, seconds = 1):Uint8Array {
+  const bytes=wavFixture(sampleRate,seconds);
+  const view=new DataView(bytes.buffer);
+  view.setUint32(4,0x7fffffbf,true);
+  view.setUint32(40,0x7fffff9b,true);
+  return bytes;
+}
 
 test('WAV duration parser rejects malformed and truncated files', () => {
   assert.equal(detectWavDuration(wavFixture(24_000,0.5)),0.5);
+  assert.equal(detectWavDuration(streamingWavFixture(24_000,0.5)),0.5);
   assert.throws(() => detectWavDuration(new TextEncoder().encode('not a wav')),/WAV/i);
 });
 
-test('Azure errors expose status without leaking credentials or response body', async () => {
+test('Qwen request maps voices, downloads audio, and normalizes streaming WAV sizes', async () => {
+  const wav=streamingWavFixture(24_000,1.5);
+  const calls:Array<{url:string;init?:RequestInit}>=[];
+  const result=await requestQwenSpeech({
+    key:'dashscope-secret',
+    model:'qwen3-tts-flash',
+    voices:QWEN_VOICES,
+    gender:'female',
+    text:'海风吹过车站。',
+    fetcher:async (url,init) => {
+      calls.push({url:String(url),init});
+      if (calls.length===1) return Response.json({
+        request_id:'request-1',
+        output:{finish_reason:'stop',audio:{url:'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/generated/test.wav',id:'audio-1',expires_at:1}},
+        usage:{input_tokens:5,output_tokens:8,total_tokens:13},
+      });
+      return new Response(wav.buffer as ArrayBuffer,{headers:{'content-type':'audio/wav'}});
+    },
+  });
+
+  assert.equal(calls.length,2);
+  assert.equal(calls[0].url,'https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation');
+  assert.equal(new Headers(calls[0].init?.headers).get('Authorization'),'Bearer dashscope-secret');
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)),{
+    model:'qwen3-tts-flash',
+    input:{text:'海风吹过车站。',voice:QWEN_VOICES.female,language_type:'Chinese'},
+  });
+  assert.equal(calls[1].url,'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/generated/test.wav');
+  assert.equal(calls[1].init?.redirect,'manual');
+  assert.equal(result.duration,1.5);
+  assert.equal(result.mime,'audio/wav');
+  assert.deepEqual(result.bytes,wavFixture(24_000,1.5));
+});
+
+test('speech provider factory exposes the shared interface through Qwen', () => {
+  const qwen=createSpeechProvider({id:'qwen',key:'key'});
+  assert.equal(qwen.id,'qwen');
+  assert.equal(qwen.label,'阿里云百炼');
+  assert.equal(qwen.model,'qwen3-tts-flash');
+  assert.deepEqual(qwen.voices,{female:'Momo',male:'Moon'});
+  assert.throws(()=>createSpeechProvider({id:'unsupported'} as never),/unsupported speech provider/i);
+});
+
+test('Qwen rejects missing credentials and untrusted audio download URLs', async () => {
+  await assert.rejects(requestQwenSpeech({key:'',gender:'male',text:'测试'}),/API key/i);
+  await assert.rejects(requestQwenSpeech({key:'key',gender:'male',text:'字'.repeat(601)}),/600/);
   await assert.rejects(
-    requestAzureSpeech({key:'secret',region:'eastasia',gender:'male',text:'测试',fetcher:async()=>new Response('credential detail',{status:401})}),
-    error => error instanceof Error && error.message === 'Speech provider failed (401)' && !error.message.includes('secret') && !error.message.includes('credential detail'),
+    requestQwenSpeech({
+      key:'key',gender:'male',text:'测试',
+      fetcher:async()=>Response.json({output:{finish_reason:'stop',audio:{url:'https://evil.example/private'}}}),
+    }),
+    /audio URL/i,
   );
+});
+
+test('Qwen errors expose status without leaking credentials or response body', async () => {
   await assert.rejects(
-    requestAzureSpeech({key:'secret',region:'https://evil.example',gender:'female',text:'测试'}),
-    /region/i,
+    requestQwenSpeech({
+      key:'dashscope-secret',gender:'male',text:'测试',
+      fetcher:async()=>new Response('credential detail',{status:401}),
+    }),
+    error => error instanceof Error && error.message === 'Speech provider failed (401)' && !error.message.includes('dashscope-secret') && !error.message.includes('credential detail'),
   );
 });

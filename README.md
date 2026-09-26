@@ -84,20 +84,22 @@ IMAGE_MODEL=gpt-image-2
 
 ## 配音接口配置
 
-MVP 使用 Azure Speech 的中文神经语音，只提供两个稳定选项：女声对应 `zh-CN-XiaoxiaoNeural`，男声对应 `zh-CN-YunxiNeural`。角色保存音色，分镜从出场角色中指定一位说话角色；当前分镜的对白同时作为字幕与合成文本。
+配音服务通过独立 provider 接口接入阿里云百炼 Qwen。角色只保存女声或男声这个逻辑选项，具体音色由 provider 映射；当前分镜的对白同时作为字幕与合成文本。
 
-先在 Azure 创建 Speech 资源并取得密钥和资源区域，然后把以下字段写入本地 `.dev.vars`，保存后重启开发服务器：
+默认接入 `qwen3-tts-flash`。先在百炼控制台取得北京地域的 API Key，然后写入本地 `.dev.vars`：
 
 ```dotenv
-AZURE_SPEECH_KEY=你的服务端密钥
-AZURE_SPEECH_REGION=eastasia
+DASHSCOPE_API_KEY=你的百炼 API Key
+QWEN_TTS_MODEL=qwen3-tts-flash
+QWEN_TTS_FEMALE_VOICE=Momo
+QWEN_TTS_MALE_VOICE=Moon
 ```
 
-区域填写资源页面显示的短名称，例如 `eastasia`、`southeastasia` 或 `japaneast`，不要填写完整 URL。密钥只由服务端读取。服务端通过 `https://{region}.tts.speech.microsoft.com/cognitiveservices/v1` 合成 24 kHz 单声道 WAV，校验文件后保存到当前账号的私有素材库。
+保存后重启开发服务器。服务端调用 `https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation`，立即下载接口返回的临时 WAV；验证文件后保存到当前账号的私有素材库。临时下载仅接受北京 OSS 域名，不会请求任意外部地址。单个镜头对白最多 600 个字符。模型、接口参数和可用音色以[阿里云 Qwen-TTS API](https://help.aliyun.com/zh/model-studio/qwen-tts-api)、[`qwen3-tts-flash` 模型说明](https://help.aliyun.com/zh/model-studio/qwen3-tts-flash)与[官方音色列表](https://help.aliyun.com/zh/model-studio/qwen-tts-voice-list)为准。
 
-[Azure Speech 官方价格页](https://azure.microsoft.com/pricing/details/speech/)目前列出的 Free (F0) 层包含每月 50 万字符的神经语音免费额度；Azure 对中文字符的计费规则与拉丁字符不同，实际用量以 Azure 控制台为准。达到免费额度或区域容量限制时，页面会保留上一版配音并允许重试。
+Qwen 默认女声为 `Momo`、男声为 `Moon`，可通过对应环境变量调整。密钥只由服务端读取，不会返回前端。达到服务商限额或调用失败时，页面会保留上一版配音并允许重试。
 
-生成配音前需要填写对白、将角色加入当前镜头，并选择说话角色。修改对白、说话角色或角色音色后，旧音频仍然保留并标记为需要更新，用户决定何时重新生成。预览会跳过过期或缺失的配音；配音短于镜头时剩余时间静音，长于镜头时在下一个镜头开始时切换。
+生成配音前需要填写对白、将角色加入当前镜头，并选择说话角色。修改对白或角色音色后，旧音频仍然保留并标记为需要更新，用户决定何时重新生成；如果把说话角色换成相同音色的另一角色，现有音频仍可继续使用。预览会跳过过期或缺失的配音；配音短于镜头时剩余时间静音，长于镜头时在下一个镜头开始时切换。
 
 ## 首版功能
 
@@ -152,6 +154,6 @@ npm run build
 npm run test:integration
 ```
 
-测试覆盖账号注册登录、密码验证、会话到期与注销、账号数据隔离、旧数据迁移、样例只读保护与副本隔离、分镜时间线、缺图和缺音频位置、字幕与选图变化、播放终点、角色参考图传参、Azure SSML 与 WAV 校验、配音失败保留、候选图历史保留、重试、并发版本冲突、素材归属与生成恢复。HTTP 验收在默认本地服务上创建两个临时账号并在结束时清理账号记录；指定 TEST_BASE_URL 时不会操作本地数据库。提供商调用在测试中使用受控响应，不会使用真实付费 API；配置真实服务后仍需分别进行端到端生图和配音验收。
+测试覆盖账号注册登录、密码验证、会话到期与注销、账号数据隔离、旧数据迁移、样例只读保护与副本隔离、分镜时间线、缺图和缺音频位置、字幕与选图变化、播放终点、角色参考图传参、Qwen provider 请求、临时音频地址限制、WAV 校验、配音失败保留、候选图历史保留、重试、并发版本冲突、素材归属与生成恢复。HTTP 验收在默认本地服务上创建两个临时账号并在结束时清理账号记录；指定 TEST_BASE_URL 时不会操作本地数据库。提供商调用在测试中使用受控响应，不会使用真实付费 API；配置真实服务后仍需分别进行端到端生图和配音验收。
 
 人工验收角色一致性时，至少选择同一角色在不同景别、表情和场景中的画面，逐一检查发型、脸部特征、服装和主要配饰。软件会携带参考图，但不能代替该人工验收。

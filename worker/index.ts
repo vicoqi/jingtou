@@ -11,8 +11,10 @@ interface Env {
   IMAGE_API_KEY?: string;
   IMAGE_API_BASE_URL?: string;
   IMAGE_MODEL?: string;
-  AZURE_SPEECH_KEY?: string;
-  AZURE_SPEECH_REGION?: string;
+  DASHSCOPE_API_KEY?: string;
+  QWEN_TTS_MODEL?: string;
+  QWEN_TTS_FEMALE_VOICE?: string;
+  QWEN_TTS_MALE_VOICE?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
