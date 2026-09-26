@@ -17,6 +17,18 @@ test('missing selections preserve timeline position and current dialogue', () =>
   assert.equal(frame.image, null);
   assert.equal(frame.missing, 1);
 });
+test('preview exposes shot-relative time and playable audio at timeline boundaries', () => {
+  const voiced=shots.map((shot,index)=>({...shot,audio:{url:index===1?'/api/assets/00000000-0000-0000-0000-000000000001':null}}));
+  const frame=previewFrame(voiced,6.5);
+  assert.equal(frame.index,1);
+  assert.equal(frame.start,5);
+  assert.equal(frame.localTime,1.5);
+  assert.equal(frame.audio,'/api/assets/00000000-0000-0000-0000-000000000001');
+  assert.equal(frame.missingAudio,11);
+  const suppressed=previewFrame(voiced,6.5,()=>false);
+  assert.equal(suppressed.audio,null);
+  assert.equal(suppressed.missingAudio,12);
+});
 test('reordering and edits immediately change preview content', () => {
   const reordered = moveItem(shots, 1, 0);
   assert.equal(previewFrame(reordered, 0).shot?.id, '1');

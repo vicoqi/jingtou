@@ -1,4 +1,4 @@
-type PreviewShot = { id: string; duration: number; dialogue: string; selectedCandidateId: string | null; candidates: { id: string; url: string }[] };
+type PreviewShot = { id: string; duration: number; dialogue: string; selectedCandidateId: string | null; candidates: { id: string; url: string }[]; audio?:{url:string | null} };
 
 export function advancePlayback(state: { time: number; playing: boolean }, delta: number, total: number) {
   if (!state.playing) return state;
@@ -6,18 +6,20 @@ export function advancePlayback(state: { time: number; playing: boolean }, delta
   return { time, playing: time < total };
 }
 
-export function previewFrame<T extends PreviewShot>(shots: T[], time: number) {
+export function previewFrame<T extends PreviewShot>(shots: T[], time: number, audioUsable:(shot:T)=>boolean = shot=>!!shot.audio?.url) {
   const total = shots.reduce((n, s) => n + s.duration, 0);
   const position = Math.max(0, Math.min(Number.isFinite(time) ? time : 0, total));
   let start = 0;
-  let index = shots.length ? shots.length - 1 : -1;
+  let index = -1;
   for (let i = 0; i < shots.length; i++) {
-    if (position < start + shots[i].duration) { index = i; break; }
-    start += shots[i].duration;
+    const end=start + shots[i].duration;
+    if (position < end || i===shots.length - 1) { index = i; break; }
+    start=end;
   }
   const shot = shots[index] ?? null;
   const image = shot?.candidates.find(c => c.id === shot.selectedCandidateId)?.url ?? null;
-  return { shot, image, index, total, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length };
+  const audio=shot && audioUsable(shot) ? shot.audio?.url ?? null : null;
+  return { shot, image, audio, index, start, localTime:shot ? Math.max(0,Math.min(shot.duration,position - start)) : 0, total, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length, missingAudio:shots.filter(s=>!!s.dialogue.trim() && !audioUsable(s)).length };
 }
 
 export function formatTime(seconds: number) {
