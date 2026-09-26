@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildShotPrompt, requestImageEdits, requestImageGeneration } from '../lib/generation.ts';
+import { emptyShotAudio } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
-const shot: Shot = { id:'s', title:'追逐', characterIds:['c'], scene:'雨夜街道', description:'主角回头', dialogue:'快跑！', duration:5, candidates:[], selectedCandidateId:null, status:'idle', error:null, generationId:null, generationStartedAt:null };
-const project: Project = { id:'p', name:'故事', description:'', aspectRatio:'16:9', style:'国风动漫', characters:[{id:'c', name:'阿岚', description:'蓝色短发', references:[{id:'r', name:'ref.png', url:'/api/assets/00000000-0000-0000-0000-000000000001'}]}], shots:[shot], revision:1, createdAt:'', updatedAt:'' };
+const shot: Shot = { id:'s', title:'追逐', characterIds:['c'], scene:'雨夜街道', description:'主角回头', dialogue:'快跑！', duration:5, speakerCharacterId:'c', audio:emptyShotAudio(), candidates:[], selectedCandidateId:null, status:'idle', error:null, generationId:null, generationStartedAt:null };
+const project: Project = { id:'p', name:'故事', description:'', aspectRatio:'16:9', style:'国风动漫', characters:[{id:'c', name:'阿岚', description:'蓝色短发', voice:'female', references:[{id:'r', name:'ref.png', url:'/api/assets/00000000-0000-0000-0000-000000000001'}]}], shots:[shot], revision:1, createdAt:'', updatedAt:'' };
 
 test('prompt uses the character description currently in the project', () => {
   assert.match(buildShotPrompt(project, shot), /蓝色短发/);
@@ -40,7 +41,7 @@ test('text-only shot does not claim that character references were provided', ()
 test('prompt assigns contiguous reference image numbers to each character', () => {
   const two = structuredClone(project);
   two.characters[0].references.push({id:'r2',name:'side.png',url:'/api/assets/00000000-0000-0000-0000-000000000002'});
-  two.characters.push({id:'c2',name:'小明',description:'红色外套',references:[{id:'r3',name:'front.png',url:'/api/assets/00000000-0000-0000-0000-000000000003'}]});
+  two.characters.push({id:'c2',name:'小明',description:'红色外套',voice:'male',references:[{id:'r3',name:'front.png',url:'/api/assets/00000000-0000-0000-0000-000000000003'}]});
   two.shots[0].characterIds.push('c2');
   const prompt = buildShotPrompt(two,two.shots[0]);
   assert.match(prompt,/阿岚.*reference images? 1–2/i);

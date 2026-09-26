@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationKind, Project, ProjectSummary, ResourceLibrary } from '../lib/types';
-import { api, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
+import { api, EMPTY_WORKSPACE_CONFIG, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
 import { summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
@@ -17,7 +17,7 @@ export function useStudio(authenticated:boolean) {
   const [navigating, setNavigating] = useState(false);
   const [saveState, setSaveState] = useState('已保存');
   const [error, setError] = useState('');
-  const [config, setConfig] = useState({ configured: false, model: '' });
+  const [config, setConfig] = useState(() => structuredClone(EMPTY_WORKSPACE_CONFIG));
   const dirty = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pending = useRef<Promise<void> | null>(null);
@@ -104,7 +104,7 @@ export function useStudio(authenticated:boolean) {
     window.addEventListener('popstate', popState);
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
   }, [authenticated,navigation]);
-  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating');
+  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating');
   const projectId = project?.id;
   useEffect(() => {
     if (!generating || working || !projectId) return;
@@ -189,5 +189,28 @@ export function useStudio(authenticated:boolean) {
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
-  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, remove, removeProject, flush, reload, refreshLibrary };
+  async function generateAudio(shotId:string) {
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
+    setWorking(true); setError('');
+    const id=current.current.id;
+    const version=navigation.version;
+    try {
+      await flush();
+      if (current.current?.id!==id || navigation.version!==version) return;
+      replace({...current.current,shots:current.current.shots.map(shot=>shot.id===shotId ? {...shot,audio:{...shot.audio,status:'generating',error:null}} : shot)});
+      const result=await generateShotAudio(id,shotId);
+      if (current.current?.id===id && navigation.version===version) replace(result.project);
+      await refreshList();
+    } catch (e) {
+      const message=(e as Error).message;
+      try {
+        if (!dirty.current && current.current?.id===id && navigation.version===version) {
+          const result=await getProject(id);
+          if (!dirty.current && current.current?.id===id && navigation.version===version) replace(result.project);
+        }
+      } catch { /* Keep last loaded data visible. */ }
+      if (navigation.version===version) setError(message);
+    } finally { setWorking(false); }
+  }
+  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { api, loadWorkspace, setClientUser } from '../lib/client.ts';
+import { api, generateShotAudio, loadWorkspace, setClientUser } from '../lib/client.ts';
 
 test('opening the public homepage never requests private works, libraries or provider settings', async t=>{
   const original=globalThis.fetch;
@@ -10,8 +10,21 @@ test('opening the public homepage never requests private works, libraries or pro
   const [list,config,library]=await loadWorkspace(false);
   assert.equal(calls,0);
   assert.deepEqual(list,{projects:[]});
-  assert.deepEqual(config,{configured:false,model:''});
+  assert.deepEqual(config,{configured:false,model:'',speech:{configured:false,provider:'Azure Speech',voices:{female:'女声',male:'男声'}}});
   assert.deepEqual(library,{characters:[],scenes:[]});
+});
+
+test('shot audio generation uses the project audio endpoint', async t => {
+  const original=globalThis.fetch;
+  t.after(()=>{globalThis.fetch=original;setClientUser(null);});
+  setClientUser({id:'user-a',email:'a@example.com'});
+  globalThis.fetch=async (url,init)=>{
+    assert.equal(url,'/api/projects/project-a/generate-audio');
+    assert.equal(init?.method,'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)),{shotId:'shot-a'});
+    return Response.json({project:{id:'project-a'}});
+  };
+  assert.deepEqual(await generateShotAudio('project-a','shot-a'),{project:{id:'project-a'}});
 });
 
 test('private requests send the expected user and explicitly avoid browser caches', async t => {

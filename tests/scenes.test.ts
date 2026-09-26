@@ -68,7 +68,7 @@ test('scene generation prefers the scene style over the project style', () => {
 
 test('shot prompt and references put scene after all character images and use current settings', () => {
   const p = { ...createProject('Scene'), scenes: [scene()] };
-  p.characters.push({ id: 'c', name: '林夏', description: '蓝色短发', references: [
+  p.characters.push({ id: 'c', name: '林夏', description: '蓝色短发', voice: 'female', references: [
     { id: 'r1', name: 'front', url: '/samples/linxia.png' }, { id: 'r2', name: 'side', url: '/samples/chenyu.png' },
   ] });
   const shot = { ...domain.newShot(), characterIds: ['c'], sceneId: 'station', scene: '下雨' };

@@ -31,6 +31,12 @@ export function shotAtTime(shots: Shot[], time: number): Shot | null {
   return getTimeline(shots).find(({ start, end }) => time >= start && time < end)?.shot ?? null;
 }
 
+export function isShotAudioStale(project:Project,shot:Shot):boolean {
+  if (!shot.audio.url) return false;
+  const speaker=shot.speakerCharacterId ? project.characters.find(character=>character.id===shot.speakerCharacterId) : null;
+  return !speaker || shot.audio.sourceText !== shot.dialogue.trim() || shot.audio.sourceVoice !== speaker.voice;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
 const internalImage = (url: unknown): url is string => isString(url) && (/^\/api\/assets\/[a-f0-9-]{36}$/.test(url) || /^\/samples\/(?:summer|linxia|chenyu)\.png$/.test(url));

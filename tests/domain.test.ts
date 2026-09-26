@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyShotAudio, getTimeline, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
+import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
 const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', duration, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
@@ -37,6 +37,23 @@ test('legacy projects gain default voices and empty audio state', () => {
   assert.equal(normalized.shots[0].speakerCharacterId, null);
   assert.deepEqual(normalized.shots[0].audio, emptyShotAudio());
   assert.doesNotThrow(() => validateProject(normalized));
+});
+
+test('audio becomes stale when dialogue, speaker, or voice changes', () => {
+  const p=project([shot('x')]);
+  p.characters=[{id:'c',name:'C',description:'',voice:'female',references:[]}];
+  p.shots[0].characterIds=['c'];
+  p.shots[0].speakerCharacterId='c';
+  p.shots[0].dialogue='你好';
+  p.shots[0].audio={...emptyShotAudio(),url:'/api/assets/00000000-0000-0000-0000-000000000001',duration:1,sourceText:'你好',sourceVoice:'female'};
+  assert.equal(isShotAudioStale(p,p.shots[0]),false);
+  p.shots[0].dialogue='你好呀';
+  assert.equal(isShotAudioStale(p,p.shots[0]),true);
+  p.shots[0].dialogue='你好';
+  p.characters[0].voice='male';
+  assert.equal(isShotAudioStale(p,p.shots[0]),true);
+  p.shots[0].speakerCharacterId=null;
+  assert.equal(isShotAudioStale(p,p.shots[0]),true);
 });
 
 test('creating shots works on LAN HTTP where crypto.randomUUID is unavailable', () => {
