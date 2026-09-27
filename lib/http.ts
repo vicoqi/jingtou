@@ -15,10 +15,22 @@ export async function bodyJson(request:Request,limit=2_000_000):Promise<Record<s
   if (!value || typeof value!=='object' || Array.isArray(value)) fail(400,'Expected a JSON object');
   return value as Record<string,unknown>;
 }
-export function checkRequestOrigin(request:Request):void {
+function forwardedValue(value:string | null):string {
+  return value?.split(',')[0].trim() ?? '';
+}
+export function requestOrigin(request:Request,trustProxy=false):string {
+  const direct=new URL(request.url).origin;
+  if (!trustProxy) return direct;
+  const protocol=forwardedValue(request.headers.get('x-forwarded-proto'));
+  const host=forwardedValue(request.headers.get('x-forwarded-host'));
+  if (!['http','https'].includes(protocol) || !host) return direct;
+  try { return new URL(`${protocol}://${host}`).origin; }
+  catch { return direct; }
+}
+export function checkRequestOrigin(request:Request,trustProxy=false):void {
   if (['GET','HEAD','OPTIONS'].includes(request.method)) return;
   const origin=request.headers.get('origin');
-  if ((origin && origin!==new URL(request.url).origin) || request.headers.get('sec-fetch-site')==='cross-site') {
+  if ((origin && origin!==requestOrigin(request,trustProxy)) || request.headers.get('sec-fetch-site')==='cross-site') {
     fail(403,'请求来源不匹配，请从本站页面操作。');
   }
 }

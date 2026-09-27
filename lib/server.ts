@@ -22,6 +22,7 @@ export type ApiEnv = {
   QWEN_TTS_MODEL?:string;
   QWEN_TTS_FEMALE_VOICE?:string;
   QWEN_TTS_MALE_VOICE?:string;
+  TRUST_PROXY?:string;
 };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
 type AssetRow = { id:string; owner:string; mime:string; name:string };
@@ -319,7 +320,7 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
 
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
-    checkRequestOrigin(request);
+    checkRequestOrigin(request,env.TRUST_PROXY==='1');
     const path=new URL(request.url).pathname;
     await ensureSchema(env);
     if (path.startsWith('/api/auth/')) return await handleAuth(request,env);

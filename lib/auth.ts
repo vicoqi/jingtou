@@ -1,7 +1,7 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import type { ApiEnv } from './server.ts';
 import type { AuthUser } from './types.ts';
-import { bodyJson, fail, json } from './http.ts';
+import { bodyJson, fail, json, requestOrigin } from './http.ts';
 
 type UserRow=AuthUser & {password_hash:string};
 const cookieName='jingtou_session';
@@ -36,8 +36,9 @@ function sessionToken(request:Request):string | null {
   const token=request.headers.get('cookie')?.split(';').map(part=>part.trim()).find(part=>part.startsWith(`${cookieName}=`))?.slice(cookieName.length+1);
   return token && /^[a-f0-9]{64}$/.test(token) ? token : null;
 }
-function sessionCookie(request:Request,token:string,maxAge=sessionSeconds):string {
-  return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${new URL(request.url).protocol==='https:' ? '; Secure' : ''}`;
+function sessionCookie(request:Request,token:string,maxAge=sessionSeconds,trustProxy=false):string {
+  const secure=new URL(requestOrigin(request,trustProxy)).protocol==='https:';
+  return `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 export async function sessionUser(request:Request,env:ApiEnv):Promise<AuthUser | null> {
   const token=sessionToken(request);
@@ -62,7 +63,7 @@ async function issueSession(request:Request,env:ApiEnv,user:AuthUser,status:numb
   await env.DB.prepare('INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').bind(digest(token),user.id,now+sessionSeconds*1000).run();
   await revokeSession(request,env);
   const response=json({user},status);
-  response.headers.set('set-cookie',sessionCookie(request,token));
+  response.headers.set('set-cookie',sessionCookie(request,token,sessionSeconds,env.TRUST_PROXY==='1'));
   return response;
 }
 async function limitAttempts(env:ApiEnv,email:string):Promise<string> {
@@ -82,7 +83,7 @@ export async function handleAuth(request:Request,env:ApiEnv):Promise<Response> {
     if (user && expected!==user.id) fail(401,'当前账号已切换，请重新登录。');
     await revokeSession(request,env);
     const response=json({ok:true});
-    response.headers.set('set-cookie',sessionCookie(request,'',0));
+    response.headers.set('set-cookie',sessionCookie(request,'',0,env.TRUST_PROXY==='1'));
     return response;
   }
   if (!['/api/auth/register','/api/auth/login'].includes(path) || request.method!=='POST') fail(404,'Endpoint not found');

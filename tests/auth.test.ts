@@ -144,6 +144,28 @@ test('cross-origin writes are rejected, and HTTP LAN cookies remain usable', asy
   assert.equal((await handleApiRequest(apiRequest('/api/projects','GET',undefined,cookie,origin),env)).status,200);
 });
 
+test('an explicitly trusted HTTPS proxy controls origin checks and secure cookies', async () => {
+  const {env}=testEnvironment();
+  const headers={
+    origin:'https://jingtou.myyuan.top',
+    'content-type':'application/json',
+    'x-forwarded-host':'jingtou.myyuan.top',
+    'x-forwarded-proto':'https',
+  };
+  const proxied=()=>new Request('http://127.0.0.1:3010/api/auth/register',{
+    method:'POST',headers,body:JSON.stringify(credentials()),
+  });
+  assert.equal((await handleApiRequest(proxied(),env)).status,403,'forwarded headers are ignored by default');
+  const registration=await handleApiRequest(proxied(),{...env,TRUST_PROXY:'1'});
+  assert.equal(registration.status,201,await registration.clone().text());
+  assert.match(registration.headers.get('set-cookie')!,/; Secure/);
+
+  const spoofed=new Request('http://127.0.0.1:3010/api/auth/login',{
+    method:'POST',headers:{...headers,origin:'https://evil.example'},body:JSON.stringify(credentials()),
+  });
+  assert.equal((await handleApiRequest(spoofed,{...env,TRUST_PROXY:'1'})).status,403);
+});
+
 test('repeated failed logins are limited and recover after the window expires', async () => {
   const {env,db}=testEnvironment();
   for(let i=0;i<10;i++) assert.equal((await handleApiRequest(apiRequest('/api/auth/login','POST',credentials()),env)).status,401);
