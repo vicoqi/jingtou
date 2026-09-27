@@ -1,4 +1,4 @@
-import type { Candidate, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio } from './types.ts';
 import { newId } from './id.ts';
 
 export function emptyShotAudio(): ShotAudio {
@@ -107,6 +107,42 @@ export function mergeGeneration(current: Project, shotId: string, generationId: 
   if (!shot || shot.generationId !== generationId || shot.status !== 'generating') throw new Error('Generation superseded');
   if (shot.candidates.length + candidates.length > 200) throw new Error('Too many candidates');
   return { ...current, [kind]: items.map(s => s.id === shotId ? { ...s, candidates: [...s.candidates, ...candidates], status: 'idle' as const, error: null, generationId: null, generationStartedAt: null } : s) };
+}
+
+function mergeGeneratedFrame<T extends GeneratedFrame>(local:T,remote:T):T {
+  const candidates=[...local.candidates];
+  const ids=new Set(candidates.map(candidate=>candidate.id));
+  for (const candidate of remote.candidates) if (!ids.has(candidate.id)) candidates.push(candidate);
+  const selectedCandidateId=local.selectedCandidateId && candidates.some(candidate=>candidate.id===local.selectedCandidateId)
+    ? local.selectedCandidateId
+    : remote.selectedCandidateId;
+  return {
+    ...local,
+    candidates,
+    selectedCandidateId,
+    status:remote.status,
+    error:remote.error,
+    generationId:remote.generationId,
+    generationStartedAt:remote.generationStartedAt,
+  };
+}
+
+export function rebaseProjectEdits(local:Project,remote:Project):Project {
+  const remoteShots=new Map(remote.shots.map(shot=>[shot.id,shot]));
+  const remoteScenes=new Map((remote.scenes ?? []).map(scene=>[scene.id,scene]));
+  return {
+    ...local,
+    revision:remote.revision,
+    updatedAt:remote.updatedAt,
+    shots:local.shots.map(shot=>{
+      const remoteShot=remoteShots.get(shot.id);
+      return remoteShot ? {...mergeGeneratedFrame(shot,remoteShot),audio:remoteShot.audio} : shot;
+    }),
+    scenes:(local.scenes ?? []).map(scene=>{
+      const remoteScene=remoteScenes.get(scene.id);
+      return remoteScene ? mergeGeneratedFrame(scene,remoteScene) : scene;
+    }),
+  };
 }
 
 export function summarizeProject(project: Project): ProjectSummary {

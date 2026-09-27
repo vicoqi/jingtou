@@ -5,7 +5,7 @@ import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
 import { ApiError, bodyJson, checkRequestOrigin, fail, json } from './http.ts';
-import type { Candidate, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary, Scene, Shot } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
@@ -163,26 +163,35 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   const key=env.IMAGE_API_KEY || env.OPENAI_API_KEY;
   const model=env.IMAGE_MODEL?.trim();
   if (!key || !model) fail(503,'请配置图片生成密钥和模型');
-  const current=await loadRecovered(env,id,owner);
-  const items = current[kind] ?? [];
-  const target = items.find(s=>s.id===targetId);
-  if (!target) fail(404,'镜头或场景不存在。');
-  if (target.status==='generating') fail(409,'正在生成，请稍候。');
-  if (target.candidates.length + count > 200) fail(400,'最多保留 200 张候选图。');
-  let prompt: string;
-  let imageUrls: string[];
-  try {
-    prompt = 'name' in target ? buildScenePrompt(current,target) : buildShotPrompt(current,target);
-    imageUrls = 'name' in target ? [] : shotReferenceUrls(current,target);
-  } catch (error) { fail(400,error instanceof Error ? error.message : '生成设定无效。'); }
-  const images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner,request.url)));
-  const generationId=crypto.randomUUID();
-  const started={...current,[kind]:items.map(s=>s.id===target.id ? {...s,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:s)};
-  const startedSaved=await saveCas(env,started,owner,current.revision);
-  if (!startedSaved) fail(409,'Project changed; reload and retry');
+  let target!:Shot | Scene;
+  let prompt='';
+  let images:ReferenceBytes[]=[];
+  let generationId='';
+  let aspectRatio:Project['aspectRatio']='16:9';
+  let startedSaved:Project | null=null;
+  for (let attempt=0;attempt<12 && !startedSaved;attempt++) {
+    const current=await loadRecovered(env,id,owner);
+    const items=current[kind] ?? [];
+    const found=items.find(item=>item.id===targetId) as Shot | Scene | undefined;
+    if (!found) fail(404,'镜头或场景不存在。');
+    if (found.status==='generating') fail(409,'正在生成，请稍候。');
+    if (found.candidates.length + count > 200) fail(400,'最多保留 200 张候选图。');
+    let imageUrls:string[];
+    try {
+      prompt='name' in found ? buildScenePrompt(current,found) : buildShotPrompt(current,found);
+      imageUrls='name' in found ? [] : shotReferenceUrls(current,found);
+    } catch (error) { fail(400,error instanceof Error ? error.message : '生成设定无效。'); }
+    images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner,request.url)));
+    generationId=crypto.randomUUID();
+    target=found;
+    aspectRatio=current.aspectRatio;
+    const started={...current,[kind]:items.map(item=>item.id===found.id ? {...item,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:item)};
+    startedSaved=await saveCas(env,started,owner,current.revision);
+  }
+  if (!startedSaved) fail(409,'Project changed repeatedly; retry');
   const generation = (async ():Promise<Project> => {
     try {
-    const providerOptions={key,model,baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',prompt,count,aspectRatio:current.aspectRatio,fetcher};
+    const providerOptions={key,model,baseUrl:env.IMAGE_API_BASE_URL || 'https://api.openai.com/v1',prompt,count,aspectRatio,fetcher};
     const output=images.length ? await requestImageEdits({...providerOptions,images}) : await requestImageGeneration(providerOptions);
     const now=new Date().toISOString();
     const candidates:Candidate[]=[];
@@ -201,6 +210,7 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
   })();
   // Keep provider work alive if the browser refreshes or closes this request.
   waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  if (waitUntil) return json({project:startedSaved},202);
   try {
     return json({project:await generation});
   } catch (error) {
@@ -262,20 +272,29 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
   const speech=resolveSpeechProvider(env);
   const provider=speech.provider;
   if (!provider) fail(503,'请配置百炼 API Key');
-  const current=await loadRecovered(env,id,owner);
-  const shot=current.shots.find(item=>item.id===body.shotId);
-  if (!shot) fail(404,'镜头不存在。');
-  if (shot.audio.status==='generating') fail(409,'配音正在生成，请稍候。');
-  const sourceText=shot.dialogue.trim();
-  if (!sourceText) fail(400,'请先填写镜头对白。');
-  if (sourceText.length>600) fail(400,'单个镜头对白不能超过 600 个字符。');
-  const speaker=shot.speakerCharacterId ? current.characters.find(character=>character.id===shot.speakerCharacterId) : null;
-  if (!speaker || !shot.characterIds.includes(speaker.id)) fail(400,'请从出场角色中选择说话角色。');
-  const sourceVoice=speaker.voice;
-  const generationId=crypto.randomUUID();
-  const started={...current,shots:current.shots.map(item=>item.id===shot.id ? {...item,audio:{...item.audio,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}} : item)};
-  const startedSaved=await saveCas(env,started,owner,current.revision);
-  if (!startedSaved) fail(409,'Project changed; reload and retry');
+  let shot!:Shot;
+  let sourceText='';
+  let sourceVoice:'female' | 'male'='female';
+  let generationId='';
+  let startedSaved:Project | null=null;
+  for (let attempt=0;attempt<12 && !startedSaved;attempt++) {
+    const current=await loadRecovered(env,id,owner);
+    const found=current.shots.find(item=>item.id===body.shotId);
+    if (!found) fail(404,'镜头不存在。');
+    if (found.audio.status==='generating') fail(409,'配音正在生成，请稍候。');
+    const text=found.dialogue.trim();
+    if (!text) fail(400,'请先填写镜头对白。');
+    if (text.length>600) fail(400,'单个镜头对白不能超过 600 个字符。');
+    const speaker=found.speakerCharacterId ? current.characters.find(character=>character.id===found.speakerCharacterId) : null;
+    if (!speaker || !found.characterIds.includes(speaker.id)) fail(400,'请从出场角色中选择说话角色。');
+    shot=found;
+    sourceText=text;
+    sourceVoice=speaker.voice;
+    generationId=crypto.randomUUID();
+    const started={...current,shots:current.shots.map(item=>item.id===found.id ? {...item,audio:{...item.audio,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}} : item)};
+    startedSaved=await saveCas(env,started,owner,current.revision);
+  }
+  if (!startedSaved) fail(409,'Project changed repeatedly; retry');
   const generation=(async ():Promise<Project>=>{
     try {
       const output=await provider.synthesize({gender:sourceVoice,text:sourceText,fetcher});
@@ -290,6 +309,7 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
     }
   })();
   waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  if (waitUntil) return json({project:startedSaved},202);
   try {
     return json({project:await generation});
   } catch (error) {

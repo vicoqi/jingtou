@@ -1,10 +1,11 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Character, GenerationKind, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from '../lib/types';
-import { api, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
-import { summarizeProject } from '../lib/domain';
+import { api, ApiError, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
+import { rebaseProjectEdits, summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
+import { isWorkspaceBusy, selectNewerProject } from '../lib/workspace-state';
 
 export function useStudio(authenticated:boolean) {
   const [project, setProject] = useState<Project | null>(null);
@@ -55,8 +56,19 @@ export function useStudio(authenticated:boolean) {
         setSaveState(dirty.current ? '等待保存…' : '已保存'); setError('');
         setProjects(items => items.map(item => item.id === saved.id ? summarizeProject(saved) : item));
         void refreshLibrary();
-      } catch (e) {
-        dirty.current = true; setSaveState('保存失败'); setError((e as Error).message); throw e;
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.status===409 && current.current?.id===snapshot.id) {
+          try {
+            const latest=await getProject(snapshot.id);
+            if (current.current?.id===snapshot.id) {
+              replace(rebaseProjectEdits(current.current,latest.project));
+              dirty.current=true;
+              setSaveState('等待保存…');
+              return;
+            }
+          } catch { /* Report the original save conflict below. */ }
+        }
+        dirty.current = true; setSaveState('保存失败'); setError((caught as Error).message); throw caught;
       }
     })();
     pending.current = work;
@@ -110,7 +122,7 @@ export function useStudio(authenticated:boolean) {
     if (!generating || working || !projectId) return;
     const interval = setInterval(() => {
       if (dirty.current || pending.current) return;
-      void getProject(projectId).then(r => { if (current.current?.id === projectId && !dirty.current && !pending.current) replace(r.project); }).catch(e => setError(e.message));
+      void getProject(projectId).then(r => { if (current.current?.id === projectId && !dirty.current && !pending.current) replace(selectNewerProject(current.current,r.project)); }).catch(e => setError(e.message));
     }, 3000);
     return () => clearInterval(interval);
   }, [generating, working, projectId, replace]);
@@ -141,7 +153,7 @@ export function useStudio(authenticated:boolean) {
     : Promise.resolve(false);
   async function generate(shotId: string, count: number, kind: GenerationKind = 'shots') {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
-    setWorking(true); setError('');
+    setError('');
     const id = current.current.id;
     const version = navigation.version;
     try {
@@ -151,7 +163,7 @@ export function useStudio(authenticated:boolean) {
       const endpoint = kind === 'scenes' ? 'generate-scene' : 'generate';
       const target = kind === 'scenes' ? { sceneId: shotId } : { shotId };
       const result = await api<{ project: Project }>(`/api/projects/${id}/${endpoint}`, { method: 'POST', body: JSON.stringify({ ...target, count }) });
-      if (current.current?.id === id && navigation.version === version) replace(result.project);
+      if (current.current?.id === id && navigation.version === version) replace(selectNewerProject(current.current,result.project));
       await refreshList(); void refreshLibrary();
     } catch (e) {
       const message = (e as Error).message;
@@ -162,7 +174,7 @@ export function useStudio(authenticated:boolean) {
         }
       } catch { /* Keep last loaded data visible. */ }
       if (navigation.version === version) setError(message);
-    } finally { setWorking(false); }
+    }
   }
   async function removeProject(id: string):Promise<boolean> {
     if (!authenticated) return false;
@@ -208,7 +220,7 @@ export function useStudio(authenticated:boolean) {
   }
   async function generateAudio(shotId:string) {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
-    setWorking(true); setError('');
+    setError('');
     const id=current.current.id;
     const version=navigation.version;
     try {
@@ -216,7 +228,7 @@ export function useStudio(authenticated:boolean) {
       if (current.current?.id!==id || navigation.version!==version) return;
       replace({...current.current,shots:current.current.shots.map(shot=>shot.id===shotId ? {...shot,audio:{...shot.audio,status:'generating',error:null}} : shot)});
       const result=await generateShotAudio(id,shotId);
-      if (current.current?.id===id && navigation.version===version) replace(result.project);
+      if (current.current?.id===id && navigation.version===version) replace(selectNewerProject(current.current,result.project));
       await refreshList();
     } catch (e) {
       const message=(e as Error).message;
@@ -227,7 +239,7 @@ export function useStudio(authenticated:boolean) {
         }
       } catch { /* Keep last loaded data visible. */ }
       if (navigation.version===version) setError(message);
-    } finally { setWorking(false); }
+    }
   }
-  return { project, projects, library, libraryLoading, loading, busy: working || navigating || generating, readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
+  return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
 }

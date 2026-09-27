@@ -259,22 +259,69 @@ test('audio generation merges into the latest edit while retaining its source sn
   });
   await Promise.race([ready,pending]);
   assert.ok(background);
+  const response=await Promise.race([
+    pending,
+    new Promise<null>(resolve=>setTimeout(()=>resolve(null),25)),
+  ]);
+  assert.ok(response,'audio generation should acknowledge the background job immediately');
+  assert.equal(response.status,202);
   try {
-    const during=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),speechEnv))).project;
+    const during=(await json(response)).project;
     assert.equal(during.shots[0].audio.status,'generating');
     during.shots[0].dialogue='生成时改过的对白';
     during.characters[0].voice='male';
     const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:during}),speechEnv))).project;
     assert.equal(saved.shots[0].audio.status,'generating');
   } finally { release(); }
-  const response=await pending;
   await background;
-  assert.equal(response.status,200);
-  const final=(await json(response)).project;
+  const final=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),speechEnv))).project;
   assert.equal(final.shots[0].dialogue,'生成时改过的对白');
   assert.equal(final.characters[0].voice,'male');
   assert.equal(final.shots[0].audio.sourceText,'生成前的对白');
   assert.equal(final.shots[0].audio.sourceVoice,'female');
+});
+
+test('different shots can start image generation while earlier jobs are still running', async () => {
+  const generationEnv={...env,OPENAI_API_KEY:'test-key'};
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'多镜头并发'}),generationEnv))).project;
+  p.shots=[
+    {...newShot(),id:'concurrent-a',title:'镜头 A',description:'清晨的站台'},
+    {...newShot(),id:'concurrent-b',title:'镜头 B',description:'夜晚的街道'},
+  ];
+  await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),generationEnv);
+  const png=new Uint8Array([137,80,78,71,13,10,26,10,0]);
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const backgrounds:Promise<unknown>[]=[];
+  const fetcher:typeof fetch=async()=>{
+    await gate;
+    return Response.json({data:[{b64_json:btoa(String.fromCharCode(...png))}]});
+  };
+  const start=async (shotId:string) => {
+    const pending=handleApiRequest(request(`/api/projects/${p.id}/generate`,'POST',{shotId,count:1}),generationEnv,{
+      fetcher,
+      waitUntil:promise=>{backgrounds.push(promise);},
+    });
+    const response=await Promise.race([
+      pending,
+      new Promise<null>(resolve=>setTimeout(()=>resolve(null),25)),
+    ]);
+    assert.ok(response,`${shotId} should acknowledge the background job immediately`);
+    assert.equal(response.status,202);
+    return await json(response);
+  };
+  try {
+    const [first,second]=await Promise.all([start('concurrent-a'),start('concurrent-b')]);
+    assert.equal(first.project.shots[0].status,'generating');
+    assert.equal(second.project.shots[1].status,'generating');
+    assert.equal(backgrounds.length,2);
+  } finally {
+    release();
+    await Promise.allSettled(backgrounds);
+  }
+  const final=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),generationEnv))).project;
+  assert.deepEqual(final.shots.map((shot:any)=>shot.status),['idle','idle']);
+  assert.deepEqual(final.shots.map((shot:any)=>shot.candidates.length),[1,1]);
 });
 
 test('sample only links to shipped images and spans sixty seconds', () => {
@@ -455,8 +502,8 @@ test('generation merges into the latest revision after another shot is edited', 
   release();
   const result = await generation;
   await background;
-  assert.equal(result.status,200);
-  const final = (await json(result)).project;
+  assert.equal(result.status,202);
+  const final = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.equal(final.shots[1].description,'edit during generation');
   assert.equal(final.shots[0].candidates.length,1);
   assert.equal(final.shots[0].selectedCandidateId,null);
@@ -699,8 +746,8 @@ test('scene generation is background work and merges without losing concurrent e
   } finally { release(); }
   const response = await pending;
   await background;
-  assert.equal(response.status,200);
-  const final = (await json(response)).project;
+  assert.equal(response.status,202);
+  const final = (await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
   assert.equal(final.shots[0].dialogue,'生成时修改的对白');
   assert.equal(final.scenes[0].description,'生成时修改的场景设定');
   assert.equal(final.scenes[0].candidates.length,3);

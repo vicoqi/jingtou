@@ -93,3 +93,24 @@ test('generation merge preserves selection, candidate history and unrelated edit
   assert.equal(next.shots[1].description, 'concurrent edit');
   assert.equal(next.shots[0].status, 'idle');
 });
+
+test('rebasing a local edit keeps completed generation results from the server', async () => {
+  const domain=await import('../lib/domain.ts');
+  assert.equal(typeof domain.rebaseProjectEdits,'function');
+  const local=project([shot('a'),shot('b')]);
+  local.revision=4;
+  local.shots[1].description='本地修改的第二个镜头';
+  const remote=structuredClone(local);
+  remote.revision=5;
+  remote.shots[1].description='保存前的第二个镜头';
+  remote.shots[0].candidates=[{id:'generated',url:'/api/assets/00000000-0000-0000-0000-000000000001',createdAt:'',prompt:'',batchId:'job',source:'generated'}];
+  remote.shots[0].status='idle';
+  remote.shots[0].generationId=null;
+  remote.shots[0].generationStartedAt=null;
+
+  const rebased=domain.rebaseProjectEdits(local,remote);
+
+  assert.equal(rebased.revision,5);
+  assert.equal(rebased.shots[1].description,'本地修改的第二个镜头');
+  assert.deepEqual(rebased.shots[0].candidates.map(candidate=>candidate.id),['generated']);
+});
