@@ -41,10 +41,11 @@ test('Qwen request maps voices, downloads audio, and normalizes streaming WAV si
   const calls:Array<{url:string;init?:RequestInit}>=[];
   const result=await requestQwenSpeech({
     key:'dashscope-secret',
-    model:'qwen3-tts-flash',
+    model:'qwen3-tts-instruct-flash',
     voices:QWEN_VOICES,
     gender:'female',
     text:'海风吹过车站。',
+    instruction:'温柔地说，语速稍慢，结尾带一点释然。',
     fetcher:async (url,init) => {
       calls.push({url:String(url),init});
       if (calls.length===1) return Response.json({
@@ -60,8 +61,8 @@ test('Qwen request maps voices, downloads audio, and normalizes streaming WAV si
   assert.equal(calls[0].url,'https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation');
   assert.equal(new Headers(calls[0].init?.headers).get('Authorization'),'Bearer dashscope-secret');
   assert.deepEqual(JSON.parse(String(calls[0].init?.body)),{
-    model:'qwen3-tts-flash',
-    input:{text:'海风吹过车站。',voice:QWEN_VOICES.female,language_type:'Chinese'},
+    model:'qwen3-tts-instruct-flash',
+    input:{text:'海风吹过车站。',voice:QWEN_VOICES.female,language_type:'Chinese',instructions:'温柔地说，语速稍慢，结尾带一点释然。',optimize_instructions:true},
   });
   assert.equal(calls[1].url,'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/generated/test.wav');
   assert.equal(calls[1].init?.redirect,'manual');
@@ -74,7 +75,7 @@ test('speech provider factory exposes the shared interface through Qwen', () => 
   const qwen=createSpeechProvider({id:'qwen',key:'key'});
   assert.equal(qwen.id,'qwen');
   assert.equal(qwen.label,'阿里云百炼');
-  assert.equal(qwen.model,'qwen3-tts-flash');
+  assert.equal(qwen.model,'qwen3-tts-instruct-flash');
   assert.deepEqual(qwen.voices,{female:'Momo',male:'Moon'});
   assert.throws(()=>createSpeechProvider({id:'unsupported'} as never),/unsupported speech provider/i);
 });
@@ -88,6 +89,13 @@ test('Qwen rejects missing credentials and untrusted audio download URLs', async
       fetcher:async()=>Response.json({output:{finish_reason:'stop',audio:{url:'https://evil.example/private'}}}),
     }),
     /audio URL/i,
+  );
+});
+
+test('Qwen rejects tone instructions on a model without instruction control', async () => {
+  await assert.rejects(
+    requestQwenSpeech({key:'key',model:'qwen3-tts-flash',gender:'female',text:'测试',instruction:'开心地说'}),
+    /qwen3-tts-instruct-flash/i,
   );
 });
 

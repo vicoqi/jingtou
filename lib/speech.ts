@@ -5,10 +5,10 @@ export const QWEN_VOICES = {
   male: 'Moon',
 } as const satisfies Record<VoiceGender,string>;
 
-export const DEFAULT_QWEN_TTS_MODEL = 'qwen3-tts-flash';
+export const DEFAULT_QWEN_TTS_MODEL = 'qwen3-tts-instruct-flash';
 
 export type SpeechOutput = {bytes:Uint8Array;mime:'audio/wav';duration:number};
-export type SpeechSynthesisInput = {gender:VoiceGender;text:string;fetcher?:typeof fetch};
+export type SpeechSynthesisInput = {gender:VoiceGender;text:string;instruction?:string;fetcher?:typeof fetch};
 export type SpeechProvider = {
   id:'qwen';
   label:string;
@@ -83,6 +83,7 @@ type QwenSpeechOptions = {
   voices?:Partial<Record<VoiceGender,string>>;
   gender:VoiceGender;
   text:string;
+  instruction?:string;
   fetcher?:typeof fetch;
 };
 
@@ -108,11 +109,20 @@ export async function requestQwenSpeech(options:QwenSpeechOptions):Promise<Speec
   const model=options.model?.trim() || DEFAULT_QWEN_TTS_MODEL;
   const voices={...QWEN_VOICES,...options.voices};
   const text=validateSpeechText(options.text);
+  const instruction=options.instruction?.trim() || '';
+  if (instruction.length > 500) throw new Error('Speech instruction must be 500 characters or fewer');
+  if (instruction && !/^qwen3-tts-instruct-flash(?:-|$)/.test(model)) throw new Error('Tone instructions require qwen3-tts-instruct-flash');
   const fetcher=options.fetcher ?? fetch;
+  const input = {
+    text,
+    voice:voices[options.gender],
+    language_type:'Chinese',
+    ...(instruction ? {instructions:instruction,optimize_instructions:true} : {}),
+  };
   const response=await fetcher('https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation',{
     method:'POST',
     headers:{Authorization:`Bearer ${options.key}`,'Content-Type':'application/json'},
-    body:JSON.stringify({model,input:{text,voice:voices[options.gender],language_type:'Chinese'}}),
+    body:JSON.stringify({model,input}),
     signal:AbortSignal.timeout(60_000),
   });
   if (!response.ok) throw new Error(`Speech provider failed (${response.status})`);

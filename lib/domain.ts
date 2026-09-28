@@ -2,11 +2,11 @@ import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary
 import { newId } from './id.ts';
 
 export function emptyShotAudio(): ShotAudio {
-  return { url: null, duration: null, sourceText: null, sourceVoice: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { url: null, duration: null, sourceText: null, sourceVoice: null, sourceInstruction: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newShot(): Shot {
-  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', duration: 5, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newScene(style = ''): Scene {
@@ -34,7 +34,7 @@ export function shotAtTime(shots: Shot[], time: number): Shot | null {
 export function isShotAudioStale(project:Project,shot:Shot):boolean {
   if (!shot.audio.url) return false;
   const speaker=shot.speakerCharacterId ? project.characters.find(character=>character.id===shot.speakerCharacterId) : null;
-  return !speaker || shot.audio.sourceText !== shot.dialogue.trim() || shot.audio.sourceVoice !== speaker.voice;
+  return !speaker || shot.audio.sourceText !== shot.dialogue.trim() || shot.audio.sourceVoice !== speaker.voice || shot.audio.sourceInstruction !== shot.voiceInstruction.trim();
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -50,10 +50,17 @@ export function normalizeProject(value: unknown): Project {
   }) : value.characters;
   const shots = Array.isArray(value.shots) ? value.shots.map(shot => {
     if (!isRecord(shot)) return shot;
+    const audio = shot.audio === undefined
+      ? emptyShotAudio()
+      : isRecord(shot.audio) && shot.audio.sourceInstruction === undefined
+        ? { ...shot.audio, sourceInstruction: shot.audio.url ? '' : null }
+        : shot.audio;
     return {
       ...shot,
+      showSubtitle: shot.showSubtitle === undefined ? true : shot.showSubtitle,
+      voiceInstruction: shot.voiceInstruction === undefined ? '' : shot.voiceInstruction,
       speakerCharacterId: shot.speakerCharacterId === undefined ? null : shot.speakerCharacterId,
-      audio: shot.audio === undefined ? emptyShotAudio() : shot.audio,
+      audio,
     };
   }) : value.shots;
   return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots } as Project;
@@ -87,15 +94,15 @@ export function validateProject(value: unknown): asserts value is Project {
   }
   const shotIds = new Set<string>();
   for (const s of value.shots) {
-    if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
+    if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || typeof s.showSubtitle !== 'boolean' || !isString(s.voiceInstruction) || s.voiceInstruction.length > 500 || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
     shotIds.add(s.id);
     if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid shot duration');
     if (s.characterIds.some((id: unknown) => !isString(id) || !characterIds.has(id))) throw new Error('Invalid shot character');
     if (!(s.speakerCharacterId === null || (isString(s.speakerCharacterId) && s.characterIds.includes(s.speakerCharacterId)))) throw new Error('Invalid shot speaker');
     if (s.sceneId !== undefined && s.sceneId !== null && (!isString(s.sceneId) || !sceneIds.has(s.sceneId))) throw new Error('Invalid shot scene');
-    if (!isRecord(s.audio) || !['idle','generating','failed'].includes(String(s.audio.status)) || !(s.audio.url === null || internalAudio(s.audio.url)) || !(s.audio.duration === null || (Number.isFinite(s.audio.duration) && Number(s.audio.duration) > 0 && Number(s.audio.duration) <= 3600)) || !(s.audio.sourceText === null || (isString(s.audio.sourceText) && s.audio.sourceText.length <= 1000)) || !(s.audio.sourceVoice === null || ['female','male'].includes(String(s.audio.sourceVoice))) || !(s.audio.error === null || isString(s.audio.error)) || !(s.audio.generationId === null || isString(s.audio.generationId)) || !(s.audio.generationStartedAt === null || isString(s.audio.generationStartedAt))) throw new Error('Invalid shot audio');
-    if (s.audio.url !== null && (s.audio.duration === null || s.audio.sourceText === null || s.audio.sourceVoice === null)) throw new Error('Invalid shot audio');
-    if (s.audio.url === null && (s.audio.duration !== null || s.audio.sourceText !== null || s.audio.sourceVoice !== null)) throw new Error('Invalid shot audio');
+    if (!isRecord(s.audio) || !['idle','generating','failed'].includes(String(s.audio.status)) || !(s.audio.url === null || internalAudio(s.audio.url)) || !(s.audio.duration === null || (Number.isFinite(s.audio.duration) && Number(s.audio.duration) > 0 && Number(s.audio.duration) <= 3600)) || !(s.audio.sourceText === null || (isString(s.audio.sourceText) && s.audio.sourceText.length <= 1000)) || !(s.audio.sourceVoice === null || ['female','male'].includes(String(s.audio.sourceVoice))) || !(s.audio.sourceInstruction === null || (isString(s.audio.sourceInstruction) && s.audio.sourceInstruction.length <= 500)) || !(s.audio.error === null || isString(s.audio.error)) || !(s.audio.generationId === null || isString(s.audio.generationId)) || !(s.audio.generationStartedAt === null || isString(s.audio.generationStartedAt))) throw new Error('Invalid shot audio');
+    if (s.audio.url !== null && (s.audio.duration === null || s.audio.sourceText === null || s.audio.sourceVoice === null || s.audio.sourceInstruction === null)) throw new Error('Invalid shot audio');
+    if (s.audio.url === null && (s.audio.duration !== null || s.audio.sourceText !== null || s.audio.sourceVoice !== null || s.audio.sourceInstruction !== null)) throw new Error('Invalid shot audio');
     if (s.audio.status === 'generating' && (!s.audio.generationId || !s.audio.generationStartedAt)) throw new Error('Invalid shot audio generation');
     validateCandidates(s);
   }

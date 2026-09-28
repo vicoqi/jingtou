@@ -14,8 +14,14 @@ test('missing selections preserve timeline position and current dialogue', () =>
   const frame = previewFrame(shots, 12);
   assert.equal(frame.shot?.id, '2');
   assert.equal(frame.shot?.dialogue, '对白 2');
+  assert.equal(frame.subtitle, '对白 2');
   assert.equal(frame.image, null);
   assert.equal(frame.missing, 1);
+});
+test('subtitle visibility is controlled per shot and defaults to visible', () => {
+  assert.equal(previewFrame([{...shots[0],showSubtitle:false}],0).subtitle, '');
+  assert.equal(previewFrame([{...shots[0],showSubtitle:true}],0).subtitle, '对白 0');
+  assert.equal(previewFrame([shots[0]],0).subtitle, '对白 0');
 });
 test('preview exposes shot-relative time and playable audio at timeline boundaries', () => {
   const voiced=shots.map((shot,index)=>({...shot,audio:{url:index===1?'/api/assets/00000000-0000-0000-0000-000000000001':null}}));

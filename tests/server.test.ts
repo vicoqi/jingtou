@@ -29,7 +29,7 @@ function speechWav(seconds=1):Uint8Array {
 const qwenSpeechEnv = () => ({
   ...env,
   DASHSCOPE_API_KEY:'dashscope-key',
-  QWEN_TTS_MODEL:'qwen3-tts-flash',
+  QWEN_TTS_MODEL:'qwen3-tts-instruct-flash',
 });
 
 function qwenSuccessFetcher(seconds=1,wait?:Promise<void>):typeof fetch {
@@ -125,6 +125,7 @@ test('explicit sample copies are editable and owner scoped while the original st
   copy.name = '我的改编';
   copy.characters[0].description = '新的角色设定';
   copy.shots[0].dialogue = '只修改我的副本';
+  copy.shots[0].showSubtitle = false;
   copy.shots[0].selectedCandidateId = copy.shots[0].candidates[1].id;
   const saved = await handleApiRequest(request(`/api/projects/${copy.id}`,'PUT',{project:copy}),env);
   assert.equal(saved.status,200);
@@ -147,7 +148,7 @@ test('generation configuration requires both a key and an explicit model', async
   const before=(await json(await handleApiRequest(request('/api/config'),env)));
   assert.equal(before.configured,false);
   assert.equal(before.speech.configured,false);
-  assert.deepEqual(before.speech,{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-flash',voices:{female:'女声',male:'男声'}});
+  assert.deepEqual(before.speech,{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}});
   env.OPENAI_API_KEY='test-key';
   env.IMAGE_MODEL='';
   const missing=(await json(await handleApiRequest(request('/api/config'),env)));
@@ -164,14 +165,14 @@ test('generation configuration requires both a key and an explicit model', async
 test('Qwen3 speech uses the official MaaS endpoint and persists private WAV bytes', async () => {
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'百炼配音'}),env))).project;
   p.characters=[{id:'speaker',name:'陈屿',description:'',voice:'male',references:[]}];
-  p.shots=[{...newShot(),id:'qwen-line',title:'百炼对白',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'等风来，我们就出发。'}];
+  p.shots=[{...newShot(),id:'qwen-line',title:'百炼对白',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'等风来，我们就出发。',voiceInstruction:'压低声音，语速稍慢，带着期待。'}];
   const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),env))).project;
   const speechEnv={
     ...qwenSpeechEnv(),
     QWEN_TTS_MALE_VOICE:'Moon',
   };
   const config=await json(await handleApiRequest(request('/api/config'),speechEnv));
-  assert.deepEqual(config.speech,{configured:true,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-flash',voices:{female:'女声',male:'男声'}});
+  assert.deepEqual(config.speech,{configured:true,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}});
   let calls=0;
   const response=await handleApiRequest(request(`/api/projects/${p.id}/generate-audio`,'POST',{shotId:'qwen-line'}),speechEnv,{fetcher:async (url,init)=>{
     calls++;
@@ -179,7 +180,7 @@ test('Qwen3 speech uses the official MaaS endpoint and persists private WAV byte
       assert.equal(String(url),'https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation');
       assert.equal(new Headers(init?.headers).get('Authorization'),'Bearer dashscope-key');
       const body=JSON.parse(String(init?.body));
-      assert.deepEqual(body,{model:'qwen3-tts-flash',input:{text:'等风来，我们就出发。',voice:'Moon',language_type:'Chinese'}});
+      assert.deepEqual(body,{model:'qwen3-tts-instruct-flash',input:{text:'等风来，我们就出发。',voice:'Moon',language_type:'Chinese',instructions:'压低声音，语速稍慢，带着期待。',optimize_instructions:true}});
       return Response.json({output:{finish_reason:'stop',audio:{url:'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio/result.wav'}}});
     }
     assert.equal(String(url),'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio/result.wav');
@@ -193,6 +194,7 @@ test('Qwen3 speech uses the official MaaS endpoint and persists private WAV byte
   assert.equal(generated.shots[0].audio.duration,0.75);
   assert.equal(generated.shots[0].audio.sourceText,'等风来，我们就出发。');
   assert.equal(generated.shots[0].audio.sourceVoice,'male');
+  assert.equal(generated.shots[0].audio.sourceInstruction,'压低声音，语速稍慢，带着期待。');
   assert.match(generated.shots[0].audio.url,/^\/api\/assets\//);
   const audio=await handleApiRequest(request(generated.shots[0].audio.url),speechEnv);
   assert.equal(audio.status,200);
@@ -246,7 +248,7 @@ test('audio generation merges into the latest edit while retaining its source sn
   const speechEnv=qwenSpeechEnv();
   const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'并发配音'}),speechEnv))).project;
   p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
-  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'生成前的对白'}];
+  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'生成前的对白',voiceInstruction:'平静地说'}];
   await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:p}),speechEnv);
   let release!:()=>void;
   let registered!:()=>void;
@@ -269,6 +271,7 @@ test('audio generation merges into the latest edit while retaining its source sn
     const during=(await json(response)).project;
     assert.equal(during.shots[0].audio.status,'generating');
     during.shots[0].dialogue='生成时改过的对白';
+    during.shots[0].voiceInstruction='急促地说';
     during.characters[0].voice='male';
     const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:during}),speechEnv))).project;
     assert.equal(saved.shots[0].audio.status,'generating');
@@ -276,9 +279,11 @@ test('audio generation merges into the latest edit while retaining its source sn
   await background;
   const final=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),speechEnv))).project;
   assert.equal(final.shots[0].dialogue,'生成时改过的对白');
+  assert.equal(final.shots[0].voiceInstruction,'急促地说');
   assert.equal(final.characters[0].voice,'male');
   assert.equal(final.shots[0].audio.sourceText,'生成前的对白');
   assert.equal(final.shots[0].audio.sourceVoice,'female');
+  assert.equal(final.shots[0].audio.sourceInstruction,'平静地说');
 });
 
 test('different shots can start image generation while earlier jobs are still running', async () => {

@@ -1,7 +1,7 @@
 import type { AuthUser, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from './types';
 
 export type WorkspaceConfig = { configured:boolean; model:string; speech:{configured:boolean;id:'qwen';provider:string;model:string;voices:{female:string;male:string}} };
-export const EMPTY_WORKSPACE_CONFIG:WorkspaceConfig = { configured:false, model:'', speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-flash',voices:{female:'女声',male:'男声'}} };
+export const EMPTY_WORKSPACE_CONFIG:WorkspaceConfig = { configured:false, model:'', speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}} };
 
 let currentUserId:string | null=null;
 export function setClientUser(user:AuthUser | null):void { currentUserId=user?.id ?? null; }

@@ -252,7 +252,7 @@ async function handleGenerateCharacter(request:Request,env:ApiEnv,owner:string,i
   return json({images});
 }
 
-async function audioGenerationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,result?:{url:string;duration:number;sourceText:string;sourceVoice:'female'|'male'},error?:string):Promise<Project> {
+async function audioGenerationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,result?:{url:string;duration:number;sourceText:string;sourceVoice:'female'|'male';sourceInstruction:string},error?:string):Promise<Project> {
   for (let attempt=0;attempt<12;attempt++) {
     const current=readProject(await rowFor(env,id,owner));
     const shot=current.shots.find(item=>item.id===shotId);
@@ -275,6 +275,7 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
   if (!provider) fail(503,'请配置百炼 API Key');
   let shot!:Shot;
   let sourceText='';
+  let sourceInstruction='';
   let sourceVoice:'female' | 'male'='female';
   let generationId='';
   let startedSaved:Project | null=null;
@@ -290,6 +291,7 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
     if (!speaker || !found.characterIds.includes(speaker.id)) fail(400,'请从出场角色中选择说话角色。');
     shot=found;
     sourceText=text;
+    sourceInstruction=found.voiceInstruction.trim();
     sourceVoice=speaker.voice;
     generationId=crypto.randomUUID();
     const started={...current,shots:current.shots.map(item=>item.id===found.id ? {...item,audio:{...item.audio,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}} : item)};
@@ -298,11 +300,11 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
   if (!startedSaved) fail(409,'Project changed repeatedly; retry');
   const generation=(async ():Promise<Project>=>{
     try {
-      const output=await provider.synthesize({gender:sourceVoice,text:sourceText,fetcher});
+      const output=await provider.synthesize({gender:sourceVoice,text:sourceText,instruction:sourceInstruction,fetcher});
       const assetId=crypto.randomUUID();
       await env.ASSETS_BUCKET.put(assetId,output.bytes,{httpMetadata:{contentType:output.mime}});
       await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,output.mime,`${shot.title || '镜头配音'}.wav`.slice(0,200)).run();
-      return await audioGenerationResult(env,owner,id,shot.id,generationId,{url:`/api/assets/${assetId}`,duration:output.duration,sourceText,sourceVoice});
+      return await audioGenerationResult(env,owner,id,shot.id,generationId,{url:`/api/assets/${assetId}`,duration:output.duration,sourceText,sourceVoice,sourceInstruction});
     } catch (error) {
       const message=error instanceof Error ? error.message : 'Speech generation failed';
       await audioGenerationResult(env,owner,id,shot.id,generationId,undefined,message).catch(()=>{});
@@ -420,7 +422,7 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       const existingShots=new Map(current.shots.map(shot=>[shot.id,shot]));
       safe.shots=safe.shots.map(shot=>{
         const old=existingShots.get(shot.id);
-        if (old?.audio.status==='generating') return {...shot,audio:{...shot.audio,url:old.audio.url,duration:old.audio.duration,sourceText:old.audio.sourceText,sourceVoice:old.audio.sourceVoice,status:old.audio.status,error:old.audio.error,generationId:old.audio.generationId,generationStartedAt:old.audio.generationStartedAt}};
+        if (old?.audio.status==='generating') return {...shot,audio:{...shot.audio,url:old.audio.url,duration:old.audio.duration,sourceText:old.audio.sourceText,sourceVoice:old.audio.sourceVoice,sourceInstruction:old.audio.sourceInstruction,status:old.audio.status,error:old.audio.error,generationId:old.audio.generationId,generationStartedAt:old.audio.generationStartedAt}};
         return {...shot,audio:{...shot.audio,status:shot.audio.status==='generating'?'idle':shot.audio.status,generationId:null,generationStartedAt:null}};
       });
       const saved=await saveCas(env,safe,owner,current.revision);

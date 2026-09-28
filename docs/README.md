@@ -84,16 +84,16 @@ IMAGE_MODEL=gpt-image-2
 
 配音服务通过独立 provider 接口接入阿里云百炼 Qwen。角色只保存女声或男声这个逻辑选项，具体音色由 provider 映射；当前分镜的对白作为合成文本保存在分镜数据中，镜头画面和成片预览暂不叠加字幕。
 
-默认接入 `qwen3-tts-flash`。先在百炼控制台取得北京地域的 API Key，然后写入本地 `.dev.vars`：
+默认接入支持自然语言语气控制的 `qwen3-tts-instruct-flash`。先在百炼控制台取得北京地域的 API Key，然后写入本地 `.dev.vars`：
 
 ```dotenv
 DASHSCOPE_API_KEY=你的百炼 API Key
-QWEN_TTS_MODEL=qwen3-tts-flash
+QWEN_TTS_MODEL=qwen3-tts-instruct-flash
 QWEN_TTS_FEMALE_VOICE=Momo
 QWEN_TTS_MALE_VOICE=Moon
 ```
 
-保存后重启开发服务器。服务端调用 `https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation`，立即下载接口返回的临时 WAV；验证文件后保存到当前账号的私有素材库。临时下载仅接受北京 OSS 域名，不会请求任意外部地址。单个镜头对白最多 600 个字符。模型、接口参数和可用音色以[阿里云 Qwen-TTS API](https://help.aliyun.com/zh/model-studio/qwen-tts-api)、[`qwen3-tts-flash` 模型说明](https://help.aliyun.com/zh/model-studio/qwen3-tts-flash)与[官方音色列表](https://help.aliyun.com/zh/model-studio/qwen-tts-voice-list)为准。
+保存后重启开发服务器。服务端调用 `https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation`，立即下载接口返回的临时 WAV；验证文件后保存到当前账号的私有素材库。临时下载仅接受北京 OSS 域名，不会请求任意外部地址。单个镜头对白最多 600 个字符，语气描述最多 500 个字符；非空语气会作为 `instructions` 发送，并开启 `optimize_instructions`。模型、接口参数和可用音色以[阿里云 Qwen-TTS API](https://help.aliyun.com/zh/model-studio/qwen-tts-api)、[`qwen3-tts-instruct-flash` 模型说明](https://help.aliyun.com/zh/model-studio/qwen3-tts-instruct-flash)与[官方音色列表](https://help.aliyun.com/zh/model-studio/qwen-tts-voice-list)为准。
 
 Qwen 默认女声为 `Momo`、男声为 `Moon`，可通过对应环境变量调整。密钥只由服务端读取，不会返回前端。达到服务商限额或调用失败时，页面会保留上一版配音并允许重试。
 

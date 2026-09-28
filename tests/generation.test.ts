@@ -4,7 +4,7 @@ import { buildCharacterPrompt, buildShotPrompt, requestImageEdits, requestImageG
 import { emptyShotAudio } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
-const shot: Shot = { id:'s', title:'追逐', characterIds:['c'], scene:'雨夜街道', description:'主角回头', dialogue:'快跑！', duration:5, speakerCharacterId:'c', audio:emptyShotAudio(), candidates:[], selectedCandidateId:null, status:'idle', error:null, generationId:null, generationStartedAt:null };
+const shot: Shot = { id:'s', title:'追逐', characterIds:['c'], scene:'雨夜街道', description:'主角回头', dialogue:'快跑！', showSubtitle:true, voiceInstruction:'', duration:5, speakerCharacterId:'c', audio:emptyShotAudio(), candidates:[], selectedCandidateId:null, status:'idle', error:null, generationId:null, generationStartedAt:null };
 const project: Project = { id:'p', name:'故事', description:'', aspectRatio:'16:9', style:'国风动漫', characters:[{id:'c', name:'阿岚', description:'蓝色短发', voice:'female', references:[{id:'r', name:'ref.png', url:'/api/assets/00000000-0000-0000-0000-000000000001'}]}], shots:[shot], revision:1, createdAt:'', updatedAt:'' };
 
 test('character prompt inherits project style and asks for a reusable single-person reference', () => {

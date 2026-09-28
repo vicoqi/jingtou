@@ -9,7 +9,7 @@
 - 创建可复用场景，选择预设风格或填写自定义风格，生成并选定场景参考图。
 - 编辑、排序和删除分镜，设置出场角色、说话角色、场景、画面描述、对白和时长。
 - 使用兼容 OpenAI Images API 的服务生成候选图，支持历史保留、放大比较、重新生成和选图。
-- 使用阿里云百炼 `qwen3-tts-flash` 生成角色配音，失败时保留上一版音频。
+- 使用阿里云百炼 `qwen3-tts-instruct-flash` 生成角色配音，支持为每个镜头描述语气、语速和情绪；失败时保留上一版音频。
 - 多个镜头可同时生成画面或配音，生成期间可以继续编辑其他镜头。
 - 按分镜顺序和时长预览选定画面与配音，支持播放、暂停、拖动和镜头跳转。
 - 自动保存制作进度；内置样例只读，可复制为个人作品继续编辑。
@@ -48,7 +48,7 @@ IMAGE_API_BASE_URL=https://new-nocf.97api.com/v1
 IMAGE_MODEL=gpt-image-2
 
 DASHSCOPE_API_KEY=你的阿里云百炼密钥
-QWEN_TTS_MODEL=qwen3-tts-flash
+QWEN_TTS_MODEL=qwen3-tts-instruct-flash
 QWEN_TTS_FEMALE_VOICE=Momo
 QWEN_TTS_MALE_VOICE=Moon
 ```

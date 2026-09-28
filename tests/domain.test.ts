@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
-const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', duration, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
+const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
 
 test('timeline preserves ordering and end boundary belongs to next shot', () => {
@@ -17,6 +17,8 @@ test('timeline preserves ordering and end boundary belongs to next shot', () => 
 test('new shot starts empty at five seconds', () => {
   const result = newShot();
   assert.equal(result.duration, 5);
+  assert.equal(result.showSubtitle, true);
+  assert.equal(result.voiceInstruction, '');
   assert.equal(result.status, 'idle');
   assert.equal(result.selectedCandidateId, null);
   assert.equal(result.speakerCharacterId, null);
@@ -30,26 +32,72 @@ test('legacy projects gain default voices and empty audio state', () => {
   delete legacy.characters[0].voice;
   delete legacy.shots[0].speakerCharacterId;
   delete legacy.shots[0].audio;
+  delete legacy.shots[0].showSubtitle;
+  delete legacy.shots[0].voiceInstruction;
 
   const normalized = normalizeProject(legacy);
 
   assert.equal(normalized.characters[0].voice, 'female');
   assert.equal(normalized.shots[0].speakerCharacterId, null);
+  assert.equal(normalized.shots[0].showSubtitle, true);
+  assert.equal(normalized.shots[0].voiceInstruction, '');
   assert.deepEqual(normalized.shots[0].audio, emptyShotAudio());
   assert.doesNotThrow(() => validateProject(normalized));
 });
 
-test('audio becomes stale when dialogue, speaker, or voice changes', () => {
+test('legacy generated audio gains an empty tone snapshot', () => {
+  const legacy = structuredClone(project([shot('x')])) as unknown as {shots:Record<string,unknown>[]};
+  legacy.shots[0].audio={
+    ...emptyShotAudio(),
+    url:'/api/assets/00000000-0000-0000-0000-000000000001',
+    duration:1,
+    sourceText:'你好',
+    sourceVoice:'female',
+  };
+  const audio=legacy.shots[0].audio as Record<string,unknown>;
+  delete audio.sourceInstruction;
+  delete legacy.shots[0].voiceInstruction;
+
+  const normalized=normalizeProject(legacy);
+
+  assert.equal(normalized.shots[0].voiceInstruction,'');
+  assert.equal(normalized.shots[0].audio.sourceInstruction,'');
+  assert.doesNotThrow(()=>validateProject(normalized));
+});
+
+test('validation accepts a hidden subtitle and rejects malformed subtitle visibility', () => {
+  const hidden = project([shot('x')]);
+  hidden.shots[0].showSubtitle = false;
+  assert.doesNotThrow(() => validateProject(hidden));
+
+  const malformed = structuredClone(hidden) as unknown as {shots:Record<string,unknown>[]};
+  malformed.shots[0].showSubtitle = 'false';
+  assert.throws(() => validateProject(malformed), /shot/i);
+});
+
+test('validation limits tone descriptions to 500 characters', () => {
+  const valid=project([shot('x')]);
+  valid.shots[0].voiceInstruction='字'.repeat(500);
+  assert.doesNotThrow(()=>validateProject(valid));
+  valid.shots[0].voiceInstruction+='字';
+  assert.throws(()=>validateProject(valid),/shot/i);
+});
+
+test('audio becomes stale when dialogue, speaker, voice, or tone instruction changes', () => {
   const p=project([shot('x')]);
   p.characters=[{id:'c',name:'C',description:'',voice:'female',references:[]}];
   p.shots[0].characterIds=['c'];
   p.shots[0].speakerCharacterId='c';
   p.shots[0].dialogue='你好';
-  p.shots[0].audio={...emptyShotAudio(),url:'/api/assets/00000000-0000-0000-0000-000000000001',duration:1,sourceText:'你好',sourceVoice:'female'};
+  p.shots[0].voiceInstruction='温柔地说';
+  p.shots[0].audio={...emptyShotAudio(),url:'/api/assets/00000000-0000-0000-0000-000000000001',duration:1,sourceText:'你好',sourceVoice:'female',sourceInstruction:'温柔地说'};
   assert.equal(isShotAudioStale(p,p.shots[0]),false);
   p.shots[0].dialogue='你好呀';
   assert.equal(isShotAudioStale(p,p.shots[0]),true);
   p.shots[0].dialogue='你好';
+  p.shots[0].voiceInstruction='激动地说';
+  assert.equal(isShotAudioStale(p,p.shots[0]),true);
+  p.shots[0].voiceInstruction='温柔地说';
   p.characters[0].voice='male';
   assert.equal(isShotAudioStale(p,p.shots[0]),true);
   p.shots[0].speakerCharacterId=null;

@@ -1,4 +1,4 @@
-type PreviewShot = { id: string; duration: number; dialogue: string; selectedCandidateId: string | null; candidates: { id: string; url: string }[]; audio?:{url:string | null} };
+type PreviewShot = { id: string; duration: number; dialogue: string; showSubtitle?: boolean; selectedCandidateId: string | null; candidates: { id: string; url: string }[]; audio?:{url:string | null} };
 
 export function advancePlayback(state: { time: number; playing: boolean }, delta: number, total: number) {
   if (!state.playing) return state;
@@ -19,7 +19,8 @@ export function previewFrame<T extends PreviewShot>(shots: T[], time: number, au
   const shot = shots[index] ?? null;
   const image = shot?.candidates.find(c => c.id === shot.selectedCandidateId)?.url ?? null;
   const audio=shot && audioUsable(shot) ? shot.audio?.url ?? null : null;
-  return { shot, image, audio, index, start, localTime:shot ? Math.max(0,Math.min(shot.duration,position - start)) : 0, total, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length, missingAudio:shots.filter(s=>!!s.dialogue.trim() && !audioUsable(s)).length };
+  const subtitle=shot?.showSubtitle !== false ? shot?.dialogue.trim() ?? '' : '';
+  return { shot, image, audio, subtitle, index, start, localTime:shot ? Math.max(0,Math.min(shot.duration,position - start)) : 0, total, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length, missingAudio:shots.filter(s=>!!s.dialogue.trim() && !audioUsable(s)).length };
 }
 
 export function formatTime(seconds: number) {
