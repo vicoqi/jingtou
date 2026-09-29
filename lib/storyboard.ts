@@ -2,7 +2,7 @@ import type { DraftCharacter, DraftShot } from './types.ts';
 import { MAX_REQUESTED_SHOTS, MAX_STORY_LENGTH, MIN_REQUESTED_SHOTS } from './domain.ts';
 import { MAX_SHOT_DURATION } from './shot-timing.ts';
 
-export const DEFAULT_STORYBOARD_MODEL = 'qwen-max';
+export const DEFAULT_STORYBOARD_MODEL = 'qwen3.8-flash';
 export const STORYBOARD_LLM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));

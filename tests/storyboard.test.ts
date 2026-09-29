@@ -37,7 +37,7 @@ test('storyboard request targets compatible-mode with json_object and model over
   assert.equal(result.shots.length, 2);
 });
 
-test('storyboard defaults to qwen-max and rejects missing credentials', async () => {
+test('storyboard defaults to qwen3.8-flash and rejects missing credentials', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   await requestStoryboard({ key: 'k', story: '故事', requestedCount: null, fetcher: async (url, init) => { calls.push({ url: String(url), init }); return chatResponse(JSON.stringify(validPayload())); } });
   assert.equal(JSON.parse(String(calls[0].init?.body)).model, DEFAULT_STORYBOARD_MODEL);

@@ -976,7 +976,7 @@ test('saving keeps a generating draft but accepts clearing a ready one', async (
 
 test('config exposes storyboard settings and sample rejects storyboard generation', async () => {
   const config = (await json(await handleApiRequest(request('/api/config'), storyboardEnv()))).storyboard;
-  assert.deepEqual(config, { configured: true, model: 'qwen-max' });
+  assert.deepEqual(config, { configured: true, model: 'qwen3.8-flash' });
   const unconfigured = (await json(await handleApiRequest(request('/api/config'), env))).storyboard;
   assert.equal(unconfigured.configured, false);
 

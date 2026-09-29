@@ -104,7 +104,7 @@ Qwen 默认女声为 `Momo`、男声为 `Moon`，可通过对应环境变量调�
 复用百炼 `DASHSCOPE_API_KEY`，通过 OpenAI 兼容模式调用 qwen 文本模型把故事拆成分镜草稿。可选环境变量：
 
 ```dotenv
-STORYBOARD_LLM_MODEL=qwen-max
+STORYBOARD_LLM_MODEL=qwen3.8-flash
 STORYBOARD_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 

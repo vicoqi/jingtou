@@ -54,7 +54,7 @@ QWEN_TTS_MODEL=qwen3-tts-instruct-flash
 QWEN_TTS_FEMALE_VOICE=Momo
 QWEN_TTS_MALE_VOICE=Moon
 
-STORYBOARD_LLM_MODEL=qwen-max
+STORYBOARD_LLM_MODEL=qwen3.8-flash
 STORYBOARD_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
