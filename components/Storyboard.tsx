@@ -2,10 +2,9 @@
 import { useState } from 'react';
 import { Check, LoaderCircle, Trash2, UsersRound, WandSparkles } from 'lucide-react';
 import type { Project, StoryboardDraft } from '../lib/types';
+import { MAX_REQUESTED_SHOTS, MAX_STORY_LENGTH, MIN_REQUESTED_SHOTS } from '../lib/domain';
+import { collectDraftCharacterUsage, nameKey, shotCharacterNames } from '../lib/storyboard-import';
 import { Modal } from './Modal';
-
-const MAX_STORY_LENGTH = 20000;
-const nameKey = (name: string) => name.trim().toLowerCase();
 
 export function StoryboardComposer({ busy, configured, initialStory, onClose, onSubmit }: { busy: boolean; configured: boolean; initialStory?: string; onClose: () => void; onSubmit: (story: string, count: number | null) => Promise<boolean> }) {
   const [story, setStory] = useState(initialStory ?? '');
@@ -13,7 +12,7 @@ export function StoryboardComposer({ busy, configured, initialStory, onClose, on
   const [working, setWorking] = useState(false);
   const trimmed = story.trim();
   const parsedCount = count.trim() ? Number(count) : null;
-  const countValid = parsedCount === null || (Number.isInteger(parsedCount) && parsedCount >= 4 && parsedCount <= 60);
+  const countValid = parsedCount === null || (Number.isInteger(parsedCount) && parsedCount >= MIN_REQUESTED_SHOTS && parsedCount <= MAX_REQUESTED_SHOTS);
   const invalid = !trimmed || trimmed.length > MAX_STORY_LENGTH || !countValid;
   return <Modal title="AI 拆镜头" onClose={onClose}>
     <form className="modal-form" onSubmit={async e => {
@@ -41,8 +40,7 @@ export function StoryboardDraftModal({ project, draft, busy, onClose, onDiscard,
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
   const keptIndexes = draft.shots.map((_, i) => i).filter(i => !removed.has(i));
-  const usedNames = new Map<string, string>();
-  for (const shot of keptIndexes.map(i => draft.shots[i])) for (const name of [...shot.characters, ...(shot.speaker ? [shot.speaker] : [])]) { const key = nameKey(name); if (key && !usedNames.has(key)) usedNames.set(key, name.trim()); }
+  const usedNames = collectDraftCharacterUsage(draft, keptIndexes);
   const confirm = async () => {
     setWorking(true); setError('');
     try { const selectId = await onConfirm(keptIndexes); onClose(selectId ?? undefined); }
@@ -68,7 +66,7 @@ export function StoryboardDraftModal({ project, draft, busy, onClose, onDiscard,
             <div><dt>场景</dt><dd>{shot.scene || '—'}</dd></div>
             <div><dt>画面</dt><dd>{shot.description}</dd></div>
             <div><dt>对白</dt><dd>{shot.dialogue || '—'}</dd></div>
-            <div><dt>人物</dt><dd>{[...new Set([...shot.characters, ...(shot.speaker ? [shot.speaker] : [])])].join('、') || '—'}</dd></div>
+            <div><dt>人物</dt><dd>{[...new Set(shotCharacterNames(shot))].join('、') || '—'}</dd></div>
           </dl>
         </article>)}
       </div>

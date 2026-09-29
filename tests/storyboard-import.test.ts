@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applyStoryboardDraft } from '../lib/storyboard-import.ts';
-import { newStoryboardDraft, validateProject } from '../lib/domain.ts';
+import { emptyShotAudio, newStoryboardDraft, validateProject } from '../lib/domain.ts';
 import type { Character, Project, StoryboardDraft } from '../lib/types.ts';
 
 const character = (id: string, name: string): Character => ({ id, name, description: `desc-${name}`, voice: 'male', references: [] });
 const baseProject = (characters: Character[] = [], shotCount = 0): Project => ({
   id: 'p1', name: '作品', description: '', aspectRatio: '16:9', style: '', characters,
-  shots: Array.from({ length: shotCount }, (_, i) => ({ id: `s${i}`, title: `镜头${i}`, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: { url: null, duration: null, sourceText: null, sourceVoice: null, sourceInstruction: null, status: 'idle' as const, error: null, generationId: null, generationStartedAt: null }, candidates: [], selectedCandidateId: null, status: 'idle' as const, error: null, generationId: null, generationStartedAt: null })),
+  shots: Array.from({ length: shotCount }, (_, i) => ({ id: `s${i}`, title: `镜头${i}`, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle' as const, error: null, generationId: null, generationStartedAt: null })),
   revision: 1, createdAt: '', updatedAt: '',
 });
 

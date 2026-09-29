@@ -2,6 +2,10 @@ import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary
 import { newId } from './id.ts';
 import { MAX_PAUSE_DURATION, MAX_SHOT_DURATION } from './shot-timing.ts';
 
+export const MAX_STORY_LENGTH = 20_000;
+export const MIN_REQUESTED_SHOTS = 4;
+export const MAX_REQUESTED_SHOTS = 60;
+
 export function emptyShotAudio(): ShotAudio {
   return { url: null, duration: null, sourceText: null, sourceVoice: null, sourceInstruction: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
@@ -18,7 +22,7 @@ export function newStoryboardDraft(story: string, requestedCount: number | null,
   return { status: 'generating', error: null, generationId, generationStartedAt: new Date().toISOString(), story, requestedCount, characters: [], shots: [] };
 }
 
-const STALE_STORYBOARD_MS = 10 * 60 * 1000;
+export const STALE_STORYBOARD_MS = 10 * 60 * 1000;
 
 export function recoverStoryboardDraft(project: Project, now = Date.now()): Project | null {
   const draft = project.storyboardDraft;
@@ -97,14 +101,14 @@ function validateStoryboardDraft(value: unknown): void {
   if (!(value.error === null || isString(value.error) && value.error.length <= 500)) throw new Error('Invalid storyboard draft');
   if (!(value.generationId === null || isString(value.generationId))) throw new Error('Invalid storyboard draft');
   if (!(value.generationStartedAt === null || isString(value.generationStartedAt))) throw new Error('Invalid storyboard draft');
-  if (!isString(value.story) || !value.story.trim() || value.story.length > 20000) throw new Error('Invalid storyboard draft');
-  if (!(value.requestedCount === null || (Number.isInteger(value.requestedCount) && (value.requestedCount as number) >= 4 && (value.requestedCount as number) <= 60))) throw new Error('Invalid storyboard draft');
+  if (!isString(value.story) || !value.story.trim() || value.story.length > MAX_STORY_LENGTH) throw new Error('Invalid storyboard draft');
+  if (!(value.requestedCount === null || (Number.isInteger(value.requestedCount) && (value.requestedCount as number) >= MIN_REQUESTED_SHOTS && (value.requestedCount as number) <= MAX_REQUESTED_SHOTS))) throw new Error('Invalid storyboard draft');
   if (!Array.isArray(value.characters) || value.characters.length > 20) throw new Error('Invalid storyboard draft');
   for (const c of value.characters as unknown[]) if (!isRecord(c) || !isString(c.name) || !c.name.trim() || c.name.length > 120 || !isString(c.description) || c.description.length > 3000) throw new Error('Invalid storyboard draft');
   if (!Array.isArray(value.shots) || value.shots.length > 60) throw new Error('Invalid storyboard draft');
   for (const s of value.shots as unknown[]) {
     if (!isRecord(s) || !isString(s.title) || s.title.length > 120 || !isString(s.scene) || s.scene.length > 500 || !isString(s.description) || s.description.length > 4000 || !isString(s.dialogue) || s.dialogue.length > 600 || !(s.speaker === null || (isString(s.speaker) && !!s.speaker.trim())) || !Array.isArray(s.characters) || (s.characters as unknown[]).some(n => !isString(n) || !n.trim())) throw new Error('Invalid storyboard draft');
-    if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid storyboard draft');
+    if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > MAX_SHOT_DURATION) throw new Error('Invalid storyboard draft');
   }
   if (value.status === 'generating' && (!isString(value.generationId) || !isString(value.generationStartedAt))) throw new Error('Invalid storyboard draft generation');
   if (value.status !== 'generating' && (value.generationId !== null || value.generationStartedAt !== null)) throw new Error('Invalid storyboard draft generation');

@@ -1,11 +1,9 @@
 import type { DraftCharacter, DraftShot } from './types.ts';
+import { MAX_REQUESTED_SHOTS, MAX_STORY_LENGTH, MIN_REQUESTED_SHOTS } from './domain.ts';
+import { MAX_SHOT_DURATION } from './shot-timing.ts';
 
 export const DEFAULT_STORYBOARD_MODEL = 'qwen-max';
 export const STORYBOARD_LLM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-
-export const MAX_STORY_LENGTH = 20_000;
-export const MIN_REQUESTED_SHOTS = 4;
-export const MAX_REQUESTED_SHOTS = 60;
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 const clip = (value: unknown, max: number): string => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -29,7 +27,7 @@ function normalizeShot(value: Record<string, unknown>): DraftShot {
   const dialogue = clip(value.dialogue, 600);
   const suggested = Number(value.duration);
   const fromDialogue = dialogue ? Math.ceil(dialogue.length / 4) : 0;
-  const duration = clamp(Math.max(clamp(Number.isFinite(suggested) ? suggested : 5, 1, 60), fromDialogue), 1, 600);
+  const duration = clamp(Math.max(clamp(Number.isFinite(suggested) ? suggested : 5, 1, 60), fromDialogue), 1, MAX_SHOT_DURATION);
   const characters = Array.isArray(value.characters)
     ? [...new Set((value.characters as unknown[]).filter((n): n is string => typeof n === 'string' && !!n.trim()).map(n => n.trim()))]
     : [];

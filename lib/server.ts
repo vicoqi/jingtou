@@ -1,5 +1,5 @@
 import { buildCharacterPrompt, buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
-import { mergeGeneration, newStoryboardDraft, normalizeProject, recoverStoryboardDraft, summarizeProject, validateProject } from './domain.ts';
+import { mergeGeneration, newStoryboardDraft, normalizeProject, recoverStoryboardDraft, summarizeProject, validateProject, MAX_REQUESTED_SHOTS, MIN_REQUESTED_SHOTS, MAX_STORY_LENGTH, STALE_STORYBOARD_MS } from './domain.ts';
 import { createSpeechProvider, DEFAULT_QWEN_TTS_MODEL, type SpeechProvider } from './speech.ts';
 import { DEFAULT_STORYBOARD_MODEL, requestStoryboard } from './storyboard.ts';
 import { createProject, createSamplePreview } from './sample.ts';
@@ -35,7 +35,7 @@ const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-sc
 const characterGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-character$/;
 const audioGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-audio$/;
 const storyboardPath = /^\/api\/projects\/([a-f0-9-]{36})\/storyboard$/;
-const staleAfter = 10 * 60 * 1000;
+
 const schemaStatements = [
   'CREATE TABLE IF NOT EXISTS assets (id text PRIMARY KEY NOT NULL, owner text NOT NULL, mime text NOT NULL, name text NOT NULL)',
   'CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, owner text NOT NULL, revision integer NOT NULL, document text NOT NULL, updated_at text NOT NULL)',
@@ -83,14 +83,14 @@ async function saveCas(env:ApiEnv,project:Project,owner:string,expectedRevision:
 function recoverStale(project:Project):Project | null {
   let changed = false;
   const recover = <T extends GeneratedFrame>(s: T): T => {
-    if (s.status !== 'generating' || !s.generationStartedAt || Date.now() - Date.parse(s.generationStartedAt) <= staleAfter) return s;
+    if (s.status !== 'generating' || !s.generationStartedAt || Date.now() - Date.parse(s.generationStartedAt) <= STALE_STORYBOARD_MS) return s;
     changed = true;
     return {...s,status:'failed' as const,error:'生成已中断，请重试。',generationId:null,generationStartedAt:null};
   };
   const shots = project.shots.map(shot => {
     const recovered=recover(shot);
     const audio=recovered.audio;
-    if (audio.status !== 'generating' || !audio.generationStartedAt || Date.now() - Date.parse(audio.generationStartedAt) <= staleAfter) return recovered;
+    if (audio.status !== 'generating' || !audio.generationStartedAt || Date.now() - Date.parse(audio.generationStartedAt) <= STALE_STORYBOARD_MS) return recovered;
     changed = true;
     return {...recovered,audio:{...audio,status:'failed' as const,error:'配音生成已中断，请重试。',generationId:null,generationStartedAt:null}};
   });
@@ -361,8 +361,8 @@ async function handleStoryboard(request:Request,env:ApiEnv,owner:string,id:strin
   const body=await bodyJson(request);
   const story=typeof body.story==='string' ? body.story.trim() : '';
   const count=body.count ?? null;
-  if (!story || story.length>20000) fail(400,'请粘贴不超过 20000 个字符的故事文本。');
-  if (count!==null && (typeof count!=='number' || !Number.isInteger(count) || count<4 || count>60)) fail(400,'期望镜头数必须是 4–60 的整数。');
+  if (!story || story.length>MAX_STORY_LENGTH) fail(400,'请粘贴不超过 20000 个字符的故事文本。');
+  if (count!==null && (typeof count!=='number' || !Number.isInteger(count) || count<MIN_REQUESTED_SHOTS || count>MAX_REQUESTED_SHOTS)) fail(400,'期望镜头数必须是 4–60 的整数。');
   if (!env.DASHSCOPE_API_KEY?.trim()) fail(503,'请配置百炼 API Key');
   let generationId='';
   let startedSaved:Project | null=null;
@@ -437,13 +437,15 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       if (!body || typeof body.name!=='string' || !body.name.trim() || body.name.length>120 || (body.demo!==undefined && typeof body.demo!=='boolean')) fail(400,'Enter a project name');
       if (body.style!==undefined && (typeof body.style!=='string' || !body.style.trim() || body.style.length>500)) fail(400,'Enter a visual style');
       const story=typeof body.story==='string' ? body.story.trim() : '';
-      if (story && story.length>20000) fail(400,'故事文本不能超过 20000 个字符。');
-      if (story && body.count!==undefined && (typeof body.count!=='number' || !Number.isInteger(body.count) || body.count<4 || body.count>60)) fail(400,'期望镜头数必须是 4–60 的整数。');
+      if (story && story.length>MAX_STORY_LENGTH) fail(400,'故事文本不能超过 20000 个字符。');
+      if (story && body.count!==undefined && (typeof body.count!=='number' || !Number.isInteger(body.count) || body.count<MIN_REQUESTED_SHOTS || body.count>MAX_REQUESTED_SHOTS)) fail(400,'期望镜头数必须是 4–60 的整数。');
       if (story && !env.DASHSCOPE_API_KEY?.trim()) fail(503,'请配置百炼 API Key');
       const baseProject=createProject(body.name,body.demo===true,typeof body.style==='string' ? body.style : undefined);
-      const project=story ? {...baseProject,storyboardDraft:newStoryboardDraft(story,typeof body.count==='number' ? body.count:null,crypto.randomUUID())} : baseProject;
+      const requestedCount=typeof body.count==='number' ? body.count : null;
+      const generationId=story ? crypto.randomUUID() : null;
+      const project=generationId ? {...baseProject,storyboardDraft:newStoryboardDraft(story,requestedCount,generationId)} : baseProject;
       await env.DB.prepare('INSERT INTO projects (id, owner, revision, document, updated_at) VALUES (?, ?, ?, ?, ?)').bind(project.id,owner,project.revision,JSON.stringify(project),project.updatedAt).run();
-      if (story) options.waitUntil?.(runStoryboardGeneration(env,owner,project.id,project.storyboardDraft!.generationId!,story,project.storyboardDraft!.requestedCount,options.fetcher).then(()=>undefined,()=>undefined));
+      if (generationId) options.waitUntil?.(runStoryboardGeneration(env,owner,project.id,generationId,story,requestedCount,options.fetcher).then(()=>undefined,()=>undefined));
       return json({project},201);
     }
     const assetMatch=path.match(uuidPath);

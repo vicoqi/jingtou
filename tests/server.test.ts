@@ -869,11 +869,11 @@ function llmGatedFetcher(gate: Promise<void>): typeof fetch {
   return async (url, init) => { await gate; return success(url, init); };
 }
 
-async function createStoryboardProject(story = '林夏在车站重逢陈屿。', count: number | null = 4) {
+async function createStoryboardProject() {
   const waits: Promise<unknown>[] = [];
   const options = { fetcher: llmSuccessFetcher(), waitUntil: (p: Promise<unknown>) => { waits.push(p); } };
-  const response = await handleApiRequest(request('/api/projects', 'POST', { name: '拆镜头作品', style: 'anime', story, count }, 'b@example.com'), storyboardEnv(), options);
-  return { response, waits, options };
+  const response = await handleApiRequest(request('/api/projects', 'POST', { name: '拆镜头作品', style: 'anime', story: '林夏在车站重逢陈屿。', count: 4 }, 'b@example.com'), storyboardEnv(), options);
+  return { response, waits };
 }
 
 test('creating a project with a story runs the storyboard task in the background', async () => {
@@ -934,16 +934,15 @@ test('storyboard failures mark the draft failed and keep the story for retry', a
   assert.equal(loaded.storyboardDraft.story, '将失败的故事');
   assert.ok(loaded.storyboardDraft.error.length <= 500, '失败原因截断到校验上限');
 
-  const longErrorOwner = 'b@example.com';
-  const longErrorProject = (await json(await handleApiRequest(request('/api/projects', 'POST', { name: '超长错误作品', style: 'anime' }, longErrorOwner), storyboardEnv()))).project;
+  const longErrorProject = (await json(await handleApiRequest(request('/api/projects', 'POST', { name: '超长错误作品', style: 'anime' }, owner), storyboardEnv()))).project;
   const longWaits: Promise<unknown>[] = [];
   const longOptions = { fetcher: async () => { throw new Error('爆'.repeat(2000)); }, waitUntil: (p: Promise<unknown>) => { longWaits.push(p); } };
-  await handleApiRequest(request(`/api/projects/${longErrorProject.id}/storyboard`, 'POST', { story: '超长错误故事' }, longErrorOwner), storyboardEnv(), longOptions);
+  await handleApiRequest(request(`/api/projects/${longErrorProject.id}/storyboard`, 'POST', { story: '超长错误故事' }, owner), storyboardEnv(), longOptions);
   await Promise.allSettled(longWaits);
-  const longLoaded = (await json(await handleApiRequest(request(`/api/projects/${longErrorProject.id}`, 'GET', undefined, longErrorOwner), storyboardEnv()))).project;
+  const longLoaded = (await json(await handleApiRequest(request(`/api/projects/${longErrorProject.id}`, 'GET', undefined, owner), storyboardEnv()))).project;
   assert.equal(longLoaded.storyboardDraft.status, 'failed');
   assert.equal(longLoaded.storyboardDraft.error.length, 500, '超长错误信息截断为 500 字符');
-  const resaved = await handleApiRequest(request(`/api/projects/${longErrorProject.id}`, 'PUT', { project: { ...longLoaded, name: '改名验证可保存' } }, longErrorOwner), storyboardEnv());
+  const resaved = await handleApiRequest(request(`/api/projects/${longErrorProject.id}`, 'PUT', { project: { ...longLoaded, name: '改名验证可保存' } }, owner), storyboardEnv());
   assert.equal(resaved.status, 200, '截断后的失败草稿不阻塞后续保存');
 });
 

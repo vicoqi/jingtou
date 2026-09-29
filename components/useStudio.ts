@@ -116,16 +116,19 @@ export function useStudio(authenticated:boolean) {
     window.addEventListener('popstate', popState);
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
   }, [authenticated,navigation]);
-  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating') || project?.storyboardDraft?.status === 'generating';
+  const generatingFrames = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating');
+  const storyboardGenerating = project?.storyboardDraft?.status === 'generating';
+  const generating = generatingFrames || storyboardGenerating;
   const projectId = project?.id;
   useEffect(() => {
     if (!generating || working || !projectId) return;
+    // Storyboard LLM calls run 30–60s with no intermediate state to show; poll slower than image/audio jobs.
     const interval = setInterval(() => {
       if (dirty.current || pending.current) return;
       void getProject(projectId).then(r => { if (current.current?.id === projectId && !dirty.current && !pending.current) replace(selectNewerProject(current.current,r.project)); }).catch(e => setError(e.message));
-    }, 3000);
+    }, storyboardGenerating && !generatingFrames ? 8000 : 3000);
     return () => clearInterval(interval);
-  }, [generating, working, projectId, replace]);
+  }, [generating, generatingFrames, storyboardGenerating, working, projectId, replace]);
   async function open(id: string) {
     if (await navigation.navigate(id)) await refreshList().catch(e => setError(e.message));
   }

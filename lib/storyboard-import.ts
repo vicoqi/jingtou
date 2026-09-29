@@ -1,24 +1,31 @@
-import type { Character, Project, Shot, StoryboardDraft } from './types.ts';
+import type { Character, DraftShot, Project, Shot, StoryboardDraft } from './types.ts';
 import { newShot } from './domain.ts';
 import { newId } from './id.ts';
 
-const nameKey = (name: string) => name.trim().toLowerCase();
+export const nameKey = (name: string) => name.trim().toLowerCase();
+
+export function shotCharacterNames(shot: DraftShot): string[] {
+  return [...shot.characters, ...(shot.speaker ? [shot.speaker] : [])];
+}
+
+export function collectDraftCharacterUsage(draft: StoryboardDraft, keptIndexes: number[]): Map<string, string> {
+  const usedNames = new Map<string, string>();
+  for (const shot of keptIndexes.map(i => draft.shots[i]).filter(s => !!s)) {
+    for (const name of shotCharacterNames(shot)) {
+      const key = nameKey(name);
+      if (key && !usedNames.has(key)) usedNames.set(key, name.trim());
+    }
+  }
+  return usedNames;
+}
 
 export function applyStoryboardDraft(project: Project, draft: StoryboardDraft, keptIndexes: number[]): { project: Project; insertedShotIds: string[] } {
   const kept = keptIndexes.map(i => draft.shots[i]).filter(s => !!s);
   if (project.shots.length + kept.length > 200) throw new Error('镜头总数不能超过 200，请先删减现有镜头或减少导入的草稿镜头。');
 
-  const usedNames = new Map<string, string>();
-  for (const shot of kept) {
-    for (const name of [...shot.characters, ...(shot.speaker ? [shot.speaker] : [])]) {
-      const key = nameKey(name);
-      if (key && !usedNames.has(key)) usedNames.set(key, name.trim());
-    }
-  }
-
   const characters = [...project.characters];
   const nameToId = new Map<string, string>();
-  for (const [key, original] of usedNames) {
+  for (const [key, original] of collectDraftCharacterUsage(draft, keptIndexes)) {
     const existing = characters.find(c => nameKey(c.name) === key);
     if (existing) { nameToId.set(key, existing.id); continue; }
     if (characters.length >= 100) throw new Error('角色总数不能超过 100，请先整理角色库再导入。');
