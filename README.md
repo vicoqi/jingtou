@@ -8,6 +8,7 @@
 - 创建角色并维护外观描述、男女音色和多张参考图，支持上传或 AI 生成角色参考图。
 - 创建可复用场景，选择预设风格或填写自定义风格，生成并选定场景参考图。
 - 编辑、排序和删除分镜，设置出场角色、说话角色、场景、画面描述、对白和时长。
+- 粘贴一段故事文本，AI 自动拆解为分镜草稿；预览确认后写入，同名角色自动复用，新人物自动建立角色卡。
 - 使用兼容 OpenAI Images API 的服务生成候选图，支持历史保留、放大比较、重新生成和选图。
 - 使用阿里云百炼 `qwen3-tts-instruct-flash` 生成角色配音，支持为每个镜头描述语气、语速和情绪；失败时保留上一版音频。
 - 查看实际配音时长，设置开口前停顿与说完后停留，一键适配镜头时长；对白会被截断时明确提示。
@@ -52,6 +53,9 @@ DASHSCOPE_API_KEY=你的阿里云百炼密钥
 QWEN_TTS_MODEL=qwen3-tts-instruct-flash
 QWEN_TTS_FEMALE_VOICE=Momo
 QWEN_TTS_MALE_VOICE=Moon
+
+STORYBOARD_LLM_MODEL=qwen-max
+STORYBOARD_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
 保存配置后重新启动服务。不要提交 `.dev.vars`、`.env` 或 `.wrangler/`。
