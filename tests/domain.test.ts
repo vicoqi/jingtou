@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
-import type { Project, Shot } from '../lib/types.ts';
+import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration, newStoryboardDraft, recoverStoryboardDraft, rebaseProjectEdits } from '../lib/domain.ts';
+import type { Project, Shot, StoryboardDraft } from '../lib/types.ts';
 
 const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
@@ -207,4 +207,69 @@ test('rebasing retains local rhythm edits while adopting newly generated audio',
   assert.equal(rebased.shots[0].duration,9);
   assert.deepEqual(rebased.shots[0].audio,remote.shots[0].audio);
   assert.deepEqual(rebased.shots[1],remote.shots[1]);
+});
+
+const readyDraft = (): StoryboardDraft => ({
+  status: 'ready', error: null, generationId: null, generationStartedAt: null,
+  story: '夏日傍晚，林夏在车站重逢陈屿。',
+  requestedCount: 8,
+  characters: [{ name: '林夏', description: '深蓝短发、珊瑚发带的少女' }],
+  shots: [{ title: '重逢', scene: '海边车站', description: '夕阳下的车站全景', dialogue: '你来了。', duration: 3, speaker: '林夏', characters: ['林夏'] }],
+});
+
+test('legacy projects gain a null storyboard draft', () => {
+  const legacy = structuredClone(project([shot('x')])) as unknown as Record<string,unknown>;
+  delete legacy.storyboardDraft;
+  const normalized = normalizeProject(legacy);
+  assert.equal(normalized.storyboardDraft, null);
+  assert.doesNotThrow(() => validateProject(normalized));
+});
+
+test('validation accepts generating, ready and failed drafts and rejects malformed ones', () => {
+  const withDraft = (draft: unknown) => { const p = structuredClone(project([])); (p as unknown as Record<string,unknown>).storyboardDraft = draft; return p; };
+  assert.doesNotThrow(() => validateProject(withDraft(newStoryboardDraft('故事', 8, 'gen-1'))));
+  assert.doesNotThrow(() => validateProject(withDraft(readyDraft())));
+  const failed = { ...newStoryboardDraft('故事', null, 'gen-1'), status: 'failed' as const, error: '失败', generationId: null, generationStartedAt: null };
+  assert.doesNotThrow(() => validateProject(withDraft(failed)));
+
+  const badStatus = withDraft({ ...readyDraft(), status: 'done' });
+  assert.throws(() => validateProject(badStatus), /storyboard/i);
+  const longStory = withDraft({ ...readyDraft(), story: '字'.repeat(20001) });
+  assert.throws(() => validateProject(longStory), /storyboard/i);
+  const badCount = withDraft({ ...readyDraft(), requestedCount: 3 });
+  assert.throws(() => validateProject(badCount), /storyboard/i);
+  const badDuration = withDraft({ ...readyDraft() });
+  (badDuration.storyboardDraft as StoryboardDraft).shots[0].duration = 601;
+  assert.throws(() => validateProject(badDuration), /storyboard/i);
+  const missingGeneration = withDraft({ ...readyDraft(), status: 'generating' as const });
+  assert.throws(() => validateProject(missingGeneration), /storyboard/i);
+  const readyWithGeneration = withDraft({ ...newStoryboardDraft('故事', null, 'gen-1'), status: 'ready' as const });
+  assert.throws(() => validateProject(readyWithGeneration), /storyboard/i);
+  const failedWithShots = withDraft({ ...failed, shots: readyDraft().shots });
+  assert.throws(() => validateProject(failedWithShots), /storyboard/i);
+});
+
+test('rebase always keeps the remote storyboard draft', () => {
+  const local = structuredClone(project([shot('a')]));
+  const remote = structuredClone(project([shot('a')]));
+  remote.revision = 2;
+  (remote as unknown as Record<string,unknown>).storyboardDraft = readyDraft();
+  const rebased = rebaseProjectEdits(local, remote);
+  assert.deepEqual(rebased.storyboardDraft, readyDraft());
+  assert.equal(rebased.revision, 2);
+});
+
+test('stale generating drafts recover to failed while keeping the story', () => {
+  const stale = structuredClone(project([]));
+  const started = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  (stale as unknown as Record<string,unknown>).storyboardDraft = { ...newStoryboardDraft('原始故事', 6, 'gen-1'), generationStartedAt: started };
+  const recovered = recoverStoryboardDraft(stale);
+  assert.ok(recovered);
+  assert.equal(recovered.storyboardDraft?.status, 'failed');
+  assert.equal(recovered.storyboardDraft?.error, '故事拆分已中断，请重试。');
+  assert.equal(recovered.storyboardDraft?.story, '原始故事');
+  assert.equal(recovered.storyboardDraft?.generationId, null);
+  const fresh = structuredClone(project([]));
+  (fresh as unknown as Record<string,unknown>).storyboardDraft = newStoryboardDraft('原始故事', 6, 'gen-2');
+  assert.equal(recoverStoryboardDraft(fresh), null);
 });

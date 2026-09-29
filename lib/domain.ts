@@ -1,4 +1,4 @@
-import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio, StoryboardDraft } from './types.ts';
 import { newId } from './id.ts';
 import { MAX_PAUSE_DURATION, MAX_SHOT_DURATION } from './shot-timing.ts';
 
@@ -12,6 +12,18 @@ export function newShot(): Shot {
 
 export function newScene(style = ''): Scene {
   return { id: newId(), name: '', description: '', style, candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+}
+
+export function newStoryboardDraft(story: string, requestedCount: number | null, generationId: string): StoryboardDraft {
+  return { status: 'generating', error: null, generationId, generationStartedAt: new Date().toISOString(), story, requestedCount, characters: [], shots: [] };
+}
+
+const STALE_STORYBOARD_MS = 10 * 60 * 1000;
+
+export function recoverStoryboardDraft(project: Project, now = Date.now()): Project | null {
+  const draft = project.storyboardDraft;
+  if (!draft || draft.status !== 'generating' || !draft.generationStartedAt || now - Date.parse(draft.generationStartedAt) <= STALE_STORYBOARD_MS) return null;
+  return { ...project, storyboardDraft: { ...draft, status: 'failed', error: '故事拆分已中断，请重试。', generationId: null, generationStartedAt: null } };
 }
 
 export function removeScene(project: Project, id: string): Project {
@@ -66,7 +78,7 @@ export function normalizeProject(value: unknown): Project {
       audio,
     };
   }) : value.shots;
-  return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots } as Project;
+  return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots, storyboardDraft: value.storyboardDraft === undefined ? null : value.storyboardDraft } as Project;
 }
 
 function validateCandidates(value: Record<string, unknown>): void {
@@ -77,6 +89,26 @@ function validateCandidates(value: Record<string, unknown>): void {
     ids.add(c.id);
   }
   if (!(value.selectedCandidateId === null || (isString(value.selectedCandidateId) && ids.has(value.selectedCandidateId)))) throw new Error('Invalid selected candidate');
+}
+
+function validateStoryboardDraft(value: unknown): void {
+  if (value === null || value === undefined) return;
+  if (!isRecord(value) || !['generating', 'ready', 'failed'].includes(String(value.status))) throw new Error('Invalid storyboard draft');
+  if (!(value.error === null || isString(value.error) && value.error.length <= 500)) throw new Error('Invalid storyboard draft');
+  if (!(value.generationId === null || isString(value.generationId))) throw new Error('Invalid storyboard draft');
+  if (!(value.generationStartedAt === null || isString(value.generationStartedAt))) throw new Error('Invalid storyboard draft');
+  if (!isString(value.story) || !value.story.trim() || value.story.length > 20000) throw new Error('Invalid storyboard draft');
+  if (!(value.requestedCount === null || (Number.isInteger(value.requestedCount) && (value.requestedCount as number) >= 4 && (value.requestedCount as number) <= 60))) throw new Error('Invalid storyboard draft');
+  if (!Array.isArray(value.characters) || value.characters.length > 20) throw new Error('Invalid storyboard draft');
+  for (const c of value.characters as unknown[]) if (!isRecord(c) || !isString(c.name) || !c.name.trim() || c.name.length > 120 || !isString(c.description) || c.description.length > 3000) throw new Error('Invalid storyboard draft');
+  if (!Array.isArray(value.shots) || value.shots.length > 60) throw new Error('Invalid storyboard draft');
+  for (const s of value.shots as unknown[]) {
+    if (!isRecord(s) || !isString(s.title) || s.title.length > 120 || !isString(s.scene) || s.scene.length > 500 || !isString(s.description) || s.description.length > 4000 || !isString(s.dialogue) || s.dialogue.length > 600 || !(s.speaker === null || (isString(s.speaker) && !!s.speaker.trim())) || !Array.isArray(s.characters) || (s.characters as unknown[]).some(n => !isString(n) || !n.trim())) throw new Error('Invalid storyboard draft');
+    if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid storyboard draft');
+  }
+  if (value.status === 'generating' && (!isString(value.generationId) || !isString(value.generationStartedAt))) throw new Error('Invalid storyboard draft generation');
+  if (value.status !== 'generating' && (value.generationId !== null || value.generationStartedAt !== null)) throw new Error('Invalid storyboard draft generation');
+  if (value.status !== 'ready' && ((value.shots as unknown[]).length || (value.characters as unknown[]).length)) throw new Error('Invalid storyboard draft');
 }
 
 export function validateProject(value: unknown): asserts value is Project {
@@ -95,6 +127,7 @@ export function validateProject(value: unknown): asserts value is Project {
     sceneIds.add(s.id);
     validateCandidates(s);
   }
+  validateStoryboardDraft((value as Record<string, unknown>).storyboardDraft ?? null);
   const shotIds = new Set<string>();
   for (const s of value.shots) {
     if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || typeof s.showSubtitle !== 'boolean' || !isString(s.voiceInstruction) || s.voiceInstruction.length > 500 || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
@@ -145,6 +178,7 @@ export function rebaseProjectEdits(local:Project,remote:Project):Project {
     ...local,
     revision:remote.revision,
     updatedAt:remote.updatedAt,
+    storyboardDraft:remote.storyboardDraft ?? null,
     shots:local.shots.map(shot=>{
       const remoteShot=remoteShots.get(shot.id);
       return remoteShot ? {...mergeGeneratedFrame(shot,remoteShot),audio:remoteShot.audio} : shot;
