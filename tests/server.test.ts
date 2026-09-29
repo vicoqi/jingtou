@@ -272,6 +272,9 @@ test('audio generation merges into the latest edit while retaining its source sn
     assert.equal(during.shots[0].audio.status,'generating');
     during.shots[0].dialogue='生成时改过的对白';
     during.shots[0].voiceInstruction='急促地说';
+    during.shots[0].audioLeadIn=0.2;
+    during.shots[0].audioTailOut=0.5;
+    during.shots[0].duration=7.5;
     during.characters[0].voice='male';
     const saved=(await json(await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:during}),speechEnv))).project;
     assert.equal(saved.shots[0].audio.status,'generating');
@@ -284,6 +287,52 @@ test('audio generation merges into the latest edit while retaining its source sn
   assert.equal(final.shots[0].audio.sourceText,'生成前的对白');
   assert.equal(final.shots[0].audio.sourceVoice,'female');
   assert.equal(final.shots[0].audio.sourceInstruction,'平静地说');
+  assert.equal(final.shots[0].audioLeadIn,0.2);
+  assert.equal(final.shots[0].audioTailOut,0.5);
+  assert.equal(final.shots[0].duration,7.5);
+});
+
+test('dialogue pauses persist across reopening and audio regeneration never changes manual duration', async () => {
+  const speechEnv=qwenSpeechEnv();
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'对白节奏'}),speechEnv))).project;
+  p.characters=[{id:'speaker',name:'林夏',description:'',voice:'female',references:[]}];
+  p.shots=[{...newShot(),id:'line',characterIds:['speaker'],speakerCharacterId:'speaker',dialogue:'你终于来了。',duration:5,audioLeadIn:0.2,audioTailOut:0.5},newShot()];
+  const path=`/api/projects/${p.id}`;
+  assert.equal((await handleApiRequest(request(path,'PUT',{project:p}),speechEnv)).status,200);
+  const generated=await handleApiRequest(request(`${path}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:qwenSuccessFetcher(6.8)});
+  assert.equal(generated.status,200);
+  const reopened=(await json(await handleApiRequest(request(path),speechEnv))).project;
+  assert.equal(reopened.shots[0].audioLeadIn,0.2);
+  assert.equal(reopened.shots[0].audioTailOut,0.5);
+  assert.equal(reopened.shots[0].duration,5);
+  assert.equal(reopened.shots[0].audio.duration,6.8);
+  assert.deepEqual(reopened.shots[1],p.shots[1]);
+  reopened.shots[0].duration=7.5;
+  assert.equal((await handleApiRequest(request(path,'PUT',{project:reopened}),speechEnv)).status,200);
+  const regenerated=await handleApiRequest(request(`${path}/generate-audio`,'POST',{shotId:'line'}),speechEnv,{fetcher:qwenSuccessFetcher(8)});
+  assert.equal(regenerated.status,200);
+  const latest=(await json(await handleApiRequest(request(path),speechEnv))).project;
+  assert.equal(latest.shots[0].duration,7.5);
+  assert.equal(latest.shots[0].audio.duration,8);
+  assert.equal(latest.shots[0].audioLeadIn,0.2);
+  assert.equal(latest.shots[0].audioTailOut,0.5);
+});
+
+test('invalid pause values are rejected without replacing the saved project', async () => {
+  const p=(await json(await handleApiRequest(request('/api/projects','POST',{name:'停顿校验'}),env))).project;
+  p.shots=[newShot()];
+  for (const field of ['audioLeadIn','audioTailOut']) {
+    for (const value of [-1,31,'1',null]) {
+      const invalid=structuredClone(p);
+      invalid.shots[0][field]=value;
+      const response=await handleApiRequest(request(`/api/projects/${p.id}`,'PUT',{project:invalid}),env);
+      assert.equal(response.status,400);
+      assert.match((await json(response)).error,/pause/i);
+    }
+  }
+  const reopened=(await json(await handleApiRequest(request(`/api/projects/${p.id}`),env))).project;
+  assert.equal(reopened.revision,p.revision);
+  assert.equal(reopened.shots.length,0);
 });
 
 test('different shots can start image generation while earlier jobs are still running', async () => {

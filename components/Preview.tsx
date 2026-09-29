@@ -4,6 +4,7 @@ import { Play, Pause, SkipBack, SkipForward, ImageOff, Volume2, VolumeX } from '
 import type { Project } from '../lib/types';
 import { isShotAudioStale } from '../lib/domain';
 import { previewFrame, formatTime, advancePlayback } from '../lib/playback';
+import { syncPreviewAudio } from '../lib/preview-audio';
 
 export function Preview({ project }: { project: Project }) {
   const [{ time, playing }, setPlayback] = useState({ time: 0, playing: false });
@@ -12,7 +13,12 @@ export function Preview({ project }: { project: Project }) {
   const timeRef=useRef(0);
   const audioRef=useRef<HTMLAudioElement>(null);
   const frame = previewFrame(project.shots, time, shot=>!!shot.audio.url && !isShotAudioStale(project,shot));
-  const last = useRef(0);
+  const clippedShots = frame.timingIssues.filter(issue=>issue.kind==='speech').map(issue=>String(issue.index+1).padStart(2,'0'));
+  const shortTailShots = frame.timingIssues.filter(issue=>issue.kind==='tail').map(issue=>String(issue.index+1).padStart(2,'0'));
+  const shotDuration = frame.shot?.duration ?? 0;
+  const audioLeadIn = frame.shot?.audioLeadIn ?? 0;
+  const audioTailOut = frame.shot?.audioTailOut ?? 0;
+  const audioDuration = frame.shot?.audio.duration ?? null;
   const seek=(nextTime:number)=>{
     const next=Math.max(0,Math.min(frame.total,nextTime));
     timeRef.current=next;
@@ -22,9 +28,9 @@ export function Preview({ project }: { project: Project }) {
   useEffect(() => {
     if (!playing) return;
     let raf = 0;
-    last.current = performance.now();
+    let last: number | null = null;
     const tick = (now: number) => {
-      const delta = (now - last.current) / 1000; last.current = now;
+      const delta = last === null ? 0 : (now - last) / 1000; last = now;
       setPlayback(state => {
         const next=advancePlayback(state, delta, frame.total);
         timeRef.current=next.time;
@@ -54,14 +60,13 @@ export function Preview({ project }: { project: Project }) {
       audio.load();
     }
     const sync=()=>{
-      const localTime=Math.max(0,Math.min(frame.shot?.duration ?? 0,timeRef.current - frame.start));
-      try { audio.currentTime=Number.isFinite(audio.duration) ? Math.min(localTime,audio.duration) : localTime; } catch { /* Metadata may still be loading. */ }
-      if (playing) void audio.play().catch(()=>{});
+      const localTime=Math.max(0,Math.min(shotDuration,timeRef.current - frame.start));
+      void syncPreviewAudio(audio,{duration:shotDuration,audioLeadIn,audioTailOut,audio:{url:frame.audio,duration:audioDuration}},localTime,playing);
     };
     if (audio.readyState>=1) sync();
     else audio.addEventListener('loadedmetadata',sync,{once:true});
     return ()=>audio.removeEventListener('loadedmetadata',sync);
-  },[frame.audio,frame.index,frame.shot?.duration,frame.start,playing,seekVersion]);
+  },[frame.audio,frame.audioActive,frame.index,frame.start,shotDuration,audioLeadIn,audioTailOut,audioDuration,playing,seekVersion]);
   useEffect(()=>()=>{ const audio=audioRef.current; if (audio) { audio.pause(); audio.removeAttribute('src'); } },[]);
   const toggle = () => {
     if (!frame.total) return;
@@ -88,6 +93,8 @@ export function Preview({ project }: { project: Project }) {
     </div>
     {frame.missing > 0 && <p className="notice warning">还有 {frame.missing} 个镜头未选图，将在对应位置显示缺失提示。</p>}
     {frame.missingAudio > 0 && <p className="notice warning preview-audio-warning">还有 {frame.missingAudio} 个对白镜头缺少最新配音，将在对应位置静音播放。</p>}
+    {clippedShots.length>0 && <p className="notice warning preview-timing-warning">镜头 {clippedShots.join('、')} 的配音会在切镜头时截断，请在「对白与节奏」中调整时长。</p>}
+    {shortTailShots.length>0 && <p className="notice warning preview-timing-warning">镜头 {shortTailShots.join('、')} 说完后的停留不足，可在「对白与节奏」中按配音适配时长。</p>}
     <div className="preview-sequence">{project.shots.map((shot, i) => <button key={shot.id} className={i === frame.index ? 'active' : ''} onClick={() => seek(project.shots.slice(0, i).reduce((n, s) => n + s.duration, 0))}><span>{String(i + 1).padStart(2, '0')}</span><span>{shot.duration}s</span></button>)}</div>
     <p className="preview-note">画面、对白字幕与已生成配音按分镜时间同步播放 · 当前版本暂不支持视频导出</p>
   </div>;

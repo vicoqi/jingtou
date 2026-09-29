@@ -55,3 +55,56 @@ test('playback stops exactly at the end and pause preserves the playhead', () =>
   assert.deepEqual(advancePlayback({ time: 20, playing: false }, 3, 60), { time: 20, playing: false });
   assert.deepEqual(advancePlayback({ time: 0, playing: true }, 0.25, 60), { time: 0.25, playing: true });
 });
+
+const timedShot={...shots[0],duration:7.5,audioLeadIn:0.2,audioTailOut:0.5,audio:{url:'/voice.wav',duration:6.8}};
+
+test('preview preloads speech but keeps lead-in and tail-out silent', () => {
+  const lead=previewFrame([timedShot],0.1);
+  assert.equal(lead.audio,'/voice.wav');
+  assert.equal(lead.audioActive,false);
+  assert.equal(lead.audioTime,0);
+  assert.equal(lead.subtitle,'');
+  const speaking=previewFrame([timedShot],0.2);
+  assert.equal(speaking.audioActive,true);
+  assert.equal(speaking.subtitle,'对白 0');
+  const tail=previewFrame([timedShot],7);
+  assert.equal(tail.audioActive,false);
+  assert.equal(tail.audioTime,6.8);
+  assert.equal(tail.subtitle,'');
+  assert.equal(previewFrame([timedShot],7.5).audioActive,false);
+});
+
+test('seeking and crossing shots use the correct speech-relative offset', () => {
+  const sequence=[shots[1],timedShot,{...timedShot,id:'last',audioLeadIn:1}];
+  const middle=previewFrame(sequence,6.7);
+  assert.equal(middle.start,5);
+  assert.ok(Math.abs(middle.audioTime-1.5)<1e-9);
+  assert.equal(middle.audioActive,true);
+  const backward=previewFrame(sequence,5.1);
+  assert.equal(backward.audioActive,false);
+  assert.equal(backward.audioTime,0);
+  const next=previewFrame(sequence,12.5);
+  assert.equal(next.shot?.id,'last');
+  assert.equal(next.audioActive,false);
+  assert.equal(next.audioTime,0);
+});
+
+test('preview lists clipped speech and insufficient tails separately and ignores stale audio', () => {
+  const sequence=[timedShot,{...timedShot,id:'cut',duration:5},{...timedShot,id:'tail',duration:7.2}];
+  assert.deepEqual(previewFrame(sequence,0).timingIssues,[{index:1,kind:'speech'},{index:2,kind:'tail'}]);
+  const stale=previewFrame(sequence,1,()=>false);
+  assert.deepEqual(stale.timingIssues,[]);
+  assert.equal(stale.audioActive,false);
+  assert.equal(stale.audio,null);
+});
+
+test('zero pauses preserve legacy subtitles and missing audio still shows dialogue between pauses', () => {
+  assert.equal(previewFrame([{...timedShot,audioLeadIn:0,audioTailOut:0}],7.4).subtitle,'对白 0');
+  assert.equal(previewFrame([{...timedShot,showSubtitle:false}],1).subtitle,'');
+  assert.equal(previewFrame([timedShot],1,()=>false).subtitle,'对白 0');
+  assert.equal(previewFrame([timedShot],7.2,()=>false).subtitle,'');
+  const empty=previewFrame([],0);
+  assert.equal(empty.audioActive,false);
+  assert.equal(empty.audioTime,0);
+  assert.deepEqual(empty.timingIssues,[]);
+});

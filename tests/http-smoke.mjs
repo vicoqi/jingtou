@@ -72,10 +72,14 @@ try {
   delete legacy.characters[0].voice;
   delete legacy.shots[0].speakerCharacterId;
   delete legacy.shots[0].audio;
+  delete legacy.shots[0].audioLeadIn;
+  delete legacy.shots[0].audioTailOut;
   project=(await request(`/api/projects/${id}`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project:legacy})})).project;
   assert.equal(project.characters[0].voice,'female');
   assert.equal(project.shots[0].speakerCharacterId,null);
   assert.equal(project.shots[0].audio.status,'idle');
+  assert.equal(project.shots[0].audioLeadIn,0);
+  assert.equal(project.shots[0].audioTailOut,0);
   if (!config.speech.configured) {
     const unconfigured=await fetchSigned(`${origin}/api/projects/${id}/generate-audio`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({shotId:project.shots[1].id})});
     assert.equal(unconfigured.status,503,'unconfigured speech generation stops before provider work');
@@ -90,6 +94,8 @@ try {
   project.name = 'HTTP 验收测试';
   project.characters[0].description = '验收修改角色，旧画面应保留';
   project.shots[0].duration = 8;
+  project.shots[0].audioLeadIn = 0.2;
+  project.shots[0].audioTailOut = 0.5;
   project.shots[0].dialogue = '新的对白应进入预览';
   const shot = project.shots.shift(); project.shots.push(shot);
   project = (await request(`/api/projects/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project }) })).project;
@@ -97,6 +103,9 @@ try {
   const reloaded = (await request(`/api/projects/${id}`)).project;
   assert.equal(reloaded.name,'HTTP 验收测试');
   assert.equal(reloaded.shots[11].dialogue, '新的对白应进入预览');
+  assert.equal(reloaded.shots[11].audioLeadIn,0.2);
+  assert.equal(reloaded.shots[11].audioTailOut,0.5);
+  assert.equal(reloaded.shots[11].duration,8);
   assert.equal(reloaded.shots[11].selectedCandidateId, oldSelection);
   assert.equal(reloaded.shots.reduce((n, s) => n + s.duration, 0), 63);
   const staleResponse = await fetchSigned(`${origin}/api/projects/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: { ...project, revision: originalRevision } }) });

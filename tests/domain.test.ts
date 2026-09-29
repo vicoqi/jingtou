@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration } from '../lib/domain.ts';
 import type { Project, Shot } from '../lib/types.ts';
 
-const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
+const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
 
 test('timeline preserves ordering and end boundary belongs to next shot', () => {
@@ -19,6 +19,8 @@ test('new shot starts empty at five seconds', () => {
   assert.equal(result.duration, 5);
   assert.equal(result.showSubtitle, true);
   assert.equal(result.voiceInstruction, '');
+  assert.equal(result.audioLeadIn, 0);
+  assert.equal(result.audioTailOut, 0);
   assert.equal(result.status, 'idle');
   assert.equal(result.selectedCandidateId, null);
   assert.equal(result.speakerCharacterId, null);
@@ -34,6 +36,8 @@ test('legacy projects gain default voices and empty audio state', () => {
   delete legacy.shots[0].audio;
   delete legacy.shots[0].showSubtitle;
   delete legacy.shots[0].voiceInstruction;
+  delete legacy.shots[0].audioLeadIn;
+  delete legacy.shots[0].audioTailOut;
 
   const normalized = normalizeProject(legacy);
 
@@ -41,6 +45,9 @@ test('legacy projects gain default voices and empty audio state', () => {
   assert.equal(normalized.shots[0].speakerCharacterId, null);
   assert.equal(normalized.shots[0].showSubtitle, true);
   assert.equal(normalized.shots[0].voiceInstruction, '');
+  assert.equal(normalized.shots[0].audioLeadIn, 0);
+  assert.equal(normalized.shots[0].audioTailOut, 0);
+  assert.equal(normalized.shots[0].duration, 5);
   assert.deepEqual(normalized.shots[0].audio, emptyShotAudio());
   assert.doesNotThrow(() => validateProject(normalized));
 });
@@ -83,6 +90,24 @@ test('validation limits tone descriptions to 500 characters', () => {
   assert.throws(()=>validateProject(valid),/shot/i);
 });
 
+test('pause validation accepts finite seconds from zero through thirty and preserves saved values', () => {
+  const valid=project([shot('x')]);
+  valid.shots[0].audioLeadIn=0.2;
+  valid.shots[0].audioTailOut=30;
+  assert.doesNotThrow(()=>validateProject(valid));
+  const normalized=normalizeProject(valid);
+  assert.equal(normalized.shots[0].audioLeadIn,0.2);
+  assert.equal(normalized.shots[0].audioTailOut,30);
+  assert.equal(normalized.shots[0].duration,5);
+  for (const field of ['audioLeadIn','audioTailOut']) {
+    for (const value of [-0.1,30.1,NaN,Infinity,'1',null]) {
+      const malformed=structuredClone(valid) as unknown as {shots:Record<string,unknown>[]};
+      malformed.shots[0][field]=value;
+      assert.throws(()=>validateProject(normalizeProject(malformed)),/pause/i,`${field}=${String(value)}`);
+    }
+  }
+});
+
 test('audio becomes stale when dialogue, speaker, voice, or tone instruction changes', () => {
   const p=project([shot('x')]);
   p.characters=[{id:'c',name:'C',description:'',voice:'female',references:[]}];
@@ -91,6 +116,10 @@ test('audio becomes stale when dialogue, speaker, voice, or tone instruction cha
   p.shots[0].dialogue='你好';
   p.shots[0].voiceInstruction='温柔地说';
   p.shots[0].audio={...emptyShotAudio(),url:'/api/assets/00000000-0000-0000-0000-000000000001',duration:1,sourceText:'你好',sourceVoice:'female',sourceInstruction:'温柔地说'};
+  assert.equal(isShotAudioStale(p,p.shots[0]),false);
+  p.shots[0].audioLeadIn=0.3;
+  p.shots[0].audioTailOut=0.5;
+  p.shots[0].duration=2;
   assert.equal(isShotAudioStale(p,p.shots[0]),false);
   p.shots[0].dialogue='你好呀';
   assert.equal(isShotAudioStale(p,p.shots[0]),true);
@@ -161,4 +190,21 @@ test('rebasing a local edit keeps completed generation results from the server',
   assert.equal(rebased.revision,5);
   assert.equal(rebased.shots[1].description,'本地修改的第二个镜头');
   assert.deepEqual(rebased.shots[0].candidates.map(candidate=>candidate.id),['generated']);
+});
+
+test('rebasing retains local rhythm edits while adopting newly generated audio', async () => {
+  const {rebaseProjectEdits}=await import('../lib/domain.ts');
+  const remote=project([shot('line'),shot('other')]);
+  const local=structuredClone(remote);
+  local.shots[0].audioLeadIn=0.3;
+  local.shots[0].audioTailOut=0.6;
+  local.shots[0].duration=9;
+  remote.revision++;
+  remote.shots[0].audio={...emptyShotAudio(),url:'/api/assets/00000000-0000-0000-0000-000000000001',duration:6.8,sourceText:'你好',sourceVoice:'female',sourceInstruction:''};
+  const rebased=rebaseProjectEdits(local,remote);
+  assert.equal(rebased.shots[0].audioLeadIn,0.3);
+  assert.equal(rebased.shots[0].audioTailOut,0.6);
+  assert.equal(rebased.shots[0].duration,9);
+  assert.deepEqual(rebased.shots[0].audio,remote.shots[0].audio);
+  assert.deepEqual(rebased.shots[1],remote.shots[1]);
 });

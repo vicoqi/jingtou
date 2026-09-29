@@ -1,12 +1,13 @@
 import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio } from './types.ts';
 import { newId } from './id.ts';
+import { MAX_PAUSE_DURATION, MAX_SHOT_DURATION } from './shot-timing.ts';
 
 export function emptyShotAudio(): ShotAudio {
   return { url: null, duration: null, sourceText: null, sourceVoice: null, sourceInstruction: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newShot(): Shot {
-  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newScene(style = ''): Scene {
@@ -59,6 +60,8 @@ export function normalizeProject(value: unknown): Project {
       ...shot,
       showSubtitle: shot.showSubtitle === undefined ? true : shot.showSubtitle,
       voiceInstruction: shot.voiceInstruction === undefined ? '' : shot.voiceInstruction,
+      audioLeadIn: shot.audioLeadIn === undefined ? 0 : shot.audioLeadIn,
+      audioTailOut: shot.audioTailOut === undefined ? 0 : shot.audioTailOut,
       speakerCharacterId: shot.speakerCharacterId === undefined ? null : shot.speakerCharacterId,
       audio,
     };
@@ -96,7 +99,8 @@ export function validateProject(value: unknown): asserts value is Project {
   for (const s of value.shots) {
     if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || typeof s.showSubtitle !== 'boolean' || !isString(s.voiceInstruction) || s.voiceInstruction.length > 500 || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
     shotIds.add(s.id);
-    if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > 600) throw new Error('Invalid shot duration');
+    if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > MAX_SHOT_DURATION) throw new Error('Invalid shot duration');
+    if ([s.audioLeadIn,s.audioTailOut].some(pause=>typeof pause!=='number' || !Number.isFinite(pause) || pause<0 || pause>MAX_PAUSE_DURATION)) throw new Error('Invalid dialogue pause');
     if (s.characterIds.some((id: unknown) => !isString(id) || !characterIds.has(id))) throw new Error('Invalid shot character');
     if (!(s.speakerCharacterId === null || (isString(s.speakerCharacterId) && s.characterIds.includes(s.speakerCharacterId)))) throw new Error('Invalid shot speaker');
     if (s.sceneId !== undefined && s.sceneId !== null && (!isString(s.sceneId) || !sceneIds.has(s.sceneId))) throw new Error('Invalid shot scene');

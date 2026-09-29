@@ -1,4 +1,6 @@
-type PreviewShot = { id: string; duration: number; dialogue: string; showSubtitle?: boolean; selectedCandidateId: string | null; candidates: { id: string; url: string }[]; audio?:{url:string | null} };
+import { getShotAudioPosition, getShotTiming, type ShotTimingInput } from './shot-timing.ts';
+
+type PreviewShot = ShotTimingInput & { id: string; dialogue: string; showSubtitle?: boolean; selectedCandidateId: string | null; candidates: { id: string; url: string }[] };
 
 export function advancePlayback(state: { time: number; playing: boolean }, delta: number, total: number) {
   if (!state.playing) return state;
@@ -19,8 +21,19 @@ export function previewFrame<T extends PreviewShot>(shots: T[], time: number, au
   const shot = shots[index] ?? null;
   const image = shot?.candidates.find(c => c.id === shot.selectedCandidateId)?.url ?? null;
   const audio=shot && audioUsable(shot) ? shot.audio?.url ?? null : null;
-  const subtitle=shot?.showSubtitle !== false ? shot?.dialogue.trim() ?? '' : '';
-  return { shot, image, audio, subtitle, index, start, localTime:shot ? Math.max(0,Math.min(shot.duration,position - start)) : 0, total, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length, missingAudio:shots.filter(s=>!!s.dialogue.trim() && !audioUsable(s)).length };
+  const localTime=shot ? Math.max(0,Math.min(shot.duration,position - start)) : 0;
+  const audioPosition=shot ? getShotAudioPosition(shot,localTime,!!audio) : {currentTime:0,active:false};
+  const timing=shot ? getShotTiming(shot,!!audio) : null;
+  const hasPauses=!!shot && ((shot.audioLeadIn ?? 0)>0 || (shot.audioTailOut ?? 0)>0);
+  const subtitleEnd=shot ? Math.min(shot.duration,timing?.audioEnd ?? shot.duration - (shot.audioTailOut ?? 0)) : 0;
+  const subtitleVisible=!hasPauses || (localTime >= (shot?.audioLeadIn ?? 0) && localTime < subtitleEnd);
+  const subtitle=shot?.showSubtitle !== false && subtitleVisible ? shot?.dialogue.trim() ?? '' : '';
+  const timingIssues:{index:number;kind:'speech'|'tail'}[]=[];
+  shots.forEach((s,i)=>{
+    const shotTiming=getShotTiming(s,audioUsable(s));
+    if (shotTiming.shortfall>0.001) timingIssues.push({index:i,kind:shotTiming.truncatedBy>0.001?'speech':'tail'});
+  });
+  return { shot, image, audio, audioTime:audioPosition.currentTime, audioActive:audioPosition.active, subtitle, index, start, localTime, total, timingIssues, missing: shots.filter(s => !s.candidates.some(c => c.id === s.selectedCandidateId)).length, missingAudio:shots.filter(s=>!!s.dialogue.trim() && !audioUsable(s)).length };
 }
 
 export function formatTime(seconds: number) {
