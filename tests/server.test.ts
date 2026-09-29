@@ -99,6 +99,7 @@ test('sample rejects saving, deletion and generation without touching data or pr
       ['POST',`${samplePath}/generate`,{shotId:'sample-shot-1',count:1}],
       ['POST',`${samplePath}/generate-character`,{name:'林夏',description:'蓝色短发',count:1}],
       ['POST',`${samplePath}/generate-audio`,{shotId:'sample-shot-1'}],
+      ['POST',`${samplePath}/storyboard`,{story:'测试故事'}],
     ] as const) {
       const response = await handleApiRequest(request(path,method,body,owner),env,options);
       assert.equal(response.status,403,`${method} ${path}`);
@@ -849,4 +850,124 @@ test('scene generation validates description and count and honors missing provid
   assert.equal(result.status,400);
   assert.match((await json(result)).error,/场景描述/);
   assert.equal(called,false);
+});
+
+const storyboardEnv = () => ({ ...env, DASHSCOPE_API_KEY: 'dashscope-key' });
+
+function llmSuccessFetcher(): typeof fetch {
+  return async () => Response.json({ choices: [{ message: { role: 'assistant', content: JSON.stringify({
+    characters: [{ name: '林夏', description: '深蓝短发少女' }],
+    shots: [
+      { title: '重逢', scene: '海边车站', description: '夕阳全景', dialogue: '你来了。', duration: 2, speaker: '林夏', characters: ['林夏'] },
+      { title: '特写', scene: '海边车站', description: '微笑特写', dialogue: '', duration: 3, speaker: null, characters: ['林夏'] },
+    ],
+  }) } }] });
+}
+
+function llmGatedFetcher(gate: Promise<void>): typeof fetch {
+  const success = llmSuccessFetcher();
+  return async (url, init) => { await gate; return success(url, init); };
+}
+
+async function createStoryboardProject(story = '林夏在车站重逢陈屿。', count: number | null = 4) {
+  const waits: Promise<unknown>[] = [];
+  const options = { fetcher: llmSuccessFetcher(), waitUntil: (p: Promise<unknown>) => { waits.push(p); } };
+  const response = await handleApiRequest(request('/api/projects', 'POST', { name: '拆镜头作品', style: 'anime', story, count }, 'b@example.com'), storyboardEnv(), options);
+  return { response, waits, options };
+}
+
+test('creating a project with a story runs the storyboard task in the background', async () => {
+  const { response, waits } = await createStoryboardProject();
+  assert.equal(response.status, 201);
+  const created = (await json(response)).project;
+  assert.equal(created.storyboardDraft.status, 'generating');
+  assert.equal(created.storyboardDraft.story, '林夏在车站重逢陈屿。');
+  assert.equal(created.storyboardDraft.requestedCount, 4);
+  await Promise.all(waits);
+  const loaded = (await json(await handleApiRequest(request(`/api/projects/${created.id}`, 'GET', undefined, 'b@example.com'), storyboardEnv()))).project;
+  assert.equal(loaded.storyboardDraft.status, 'ready');
+  assert.equal(loaded.storyboardDraft.shots.length, 2);
+  assert.ok(loaded.storyboardDraft.shots[0].duration >= 1);
+  assert.equal(loaded.storyboardDraft.characters[0].name, '林夏');
+});
+
+test('storyboard endpoint validates input, requires configuration, and guards concurrency', async () => {
+  const owner = 'b@example.com';
+  const created = (await json(await handleApiRequest(request('/api/projects', 'POST', { name: '拆镜头作品2', style: 'anime' }, owner), storyboardEnv()))).project;
+
+  const badStory = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '   ' }, owner), storyboardEnv());
+  assert.equal(badStory.status, 400);
+  const badCount = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '故事', count: 61 }, owner), storyboardEnv());
+  assert.equal(badCount.status, 400);
+
+  const noKey = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '故事' }, owner), env);
+  assert.equal(noKey.status, 503);
+
+  const waits: Promise<unknown>[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const options = { fetcher: llmGatedFetcher(gate), waitUntil: (p: Promise<unknown>) => { waits.push(p); } };
+  const started = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '第二次提交的故事。' }, owner), storyboardEnv(), options);
+  assert.equal(started.status, 202);
+  const generating = (await json(started)).project;
+  assert.equal(generating.storyboardDraft.status, 'generating');
+  const duplicate = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '重复' }, owner), storyboardEnv(), options);
+  assert.equal(duplicate.status, 409);
+  release();
+  await Promise.all(waits);
+  const ready = (await json(await handleApiRequest(request(`/api/projects/${created.id}`, 'GET', undefined, owner), storyboardEnv()))).project;
+  assert.equal(ready.storyboardDraft.story, '第二次提交的故事。', 'ready 后可覆盖重试');
+  const replaced = await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '重新拆分。' }, owner), storyboardEnv(), { fetcher: llmSuccessFetcher(), waitUntil: (p: Promise<unknown>) => { waits.push(p); } });
+  assert.equal(replaced.status, 202);
+});
+
+test('storyboard failures mark the draft failed and keep the story for retry', async () => {
+  const owner = 'b@example.com';
+  const created = (await json(await handleApiRequest(request('/api/projects', 'POST', { name: '失败作品', style: 'anime' }, owner), storyboardEnv()))).project;
+  const waits: Promise<unknown>[] = [];
+  const options = { fetcher: async () => new Response('upstream boom', { status: 503 }), waitUntil: (p: Promise<unknown>) => { waits.push(p); } };
+  await handleApiRequest(request(`/api/projects/${created.id}/storyboard`, 'POST', { story: '将失败的故事' }, owner), storyboardEnv(), options);
+  await Promise.allSettled(waits);
+  const loaded = (await json(await handleApiRequest(request(`/api/projects/${created.id}`, 'GET', undefined, owner), storyboardEnv()))).project;
+  assert.equal(loaded.storyboardDraft.status, 'failed');
+  assert.match(loaded.storyboardDraft.error, /503/);
+  assert.equal(loaded.storyboardDraft.story, '将失败的故事');
+});
+
+test('saving keeps a generating draft but accepts clearing a ready one', async () => {
+  const owner = 'b@example.com';
+  const waits: Promise<unknown>[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const options = { fetcher: llmGatedFetcher(gate), waitUntil: (p: Promise<unknown>) => { waits.push(p); } };
+  const response = await handleApiRequest(request('/api/projects', 'POST', { name: '拆镜头作品', style: 'anime', story: '保护测试故事。', count: 4 }, owner), storyboardEnv(), options);
+  const created = (await json(response)).project;
+
+  const localDuringGenerating = structuredClone(created);
+  localDuringGenerating.name = '编辑中改名';
+  localDuringGenerating.storyboardDraft = null;
+  const savedGenerating = await handleApiRequest(request(`/api/projects/${created.id}`, 'PUT', { project: localDuringGenerating }, owner), storyboardEnv());
+  assert.equal(savedGenerating.status, 200);
+  const kept = (await json(savedGenerating)).project;
+  assert.equal(kept.name, '编辑中改名');
+  assert.equal(kept.storyboardDraft.status, 'generating', '远端 generating 草稿不被 PUT 清除');
+  release();
+  await Promise.all(waits);
+
+  const ready = (await json(await handleApiRequest(request(`/api/projects/${created.id}`, 'GET', undefined, owner), storyboardEnv()))).project;
+  const confirmed = structuredClone(ready);
+  confirmed.storyboardDraft = null;
+  const savedClear = await handleApiRequest(request(`/api/projects/${created.id}`, 'PUT', { project: confirmed }, owner), storyboardEnv());
+  assert.equal(savedClear.status, 200);
+  assert.equal((await json(savedClear)).project.storyboardDraft, null);
+});
+
+test('config exposes storyboard settings and sample rejects storyboard generation', async () => {
+  const config = (await json(await handleApiRequest(request('/api/config'), storyboardEnv()))).storyboard;
+  assert.deepEqual(config, { configured: true, model: 'qwen-max' });
+  const unconfigured = (await json(await handleApiRequest(request('/api/config'), env))).storyboard;
+  assert.equal(unconfigured.configured, false);
+
+  const response = await handleApiRequest(request(`${samplePath}/storyboard`, 'POST', { story: '测试' }), env, { fetcher: async () => { throw new Error('must not call'); } });
+  assert.equal(response.status, 403);
 });

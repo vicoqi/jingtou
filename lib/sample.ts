@@ -12,7 +12,7 @@ export function createSamplePreview(): Project {
 }
 
 function buildProject(name: string, demo: boolean, id: string, now: string, style: string): Project {
-  const project: Project = { id, name: name.trim(), description: '', aspectRatio: '16:9', style: style.trim(), characters: [], scenes: [], shots: [], revision: 1, createdAt: now, updatedAt: now };
+  const project: Project = { id, name: name.trim(), description: '', aspectRatio: '16:9', style: style.trim(), characters: [], scenes: [], shots: [], storyboardDraft: null, revision: 1, createdAt: now, updatedAt: now };
   if (!demo) return project;
   project.name = '夏日来信 · 样例';
   project.description = '三张示例素材编排为十二个分镜，共六十秒，用于体验流程。';

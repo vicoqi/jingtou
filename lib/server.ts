@@ -1,11 +1,12 @@
 import { buildCharacterPrompt, buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
-import { mergeGeneration, normalizeProject, summarizeProject, validateProject } from './domain.ts';
+import { mergeGeneration, newStoryboardDraft, normalizeProject, recoverStoryboardDraft, summarizeProject, validateProject } from './domain.ts';
 import { createSpeechProvider, DEFAULT_QWEN_TTS_MODEL, type SpeechProvider } from './speech.ts';
+import { DEFAULT_STORYBOARD_MODEL, requestStoryboard } from './storyboard.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
 import { ApiError, bodyJson, checkRequestOrigin, fail, json } from './http.ts';
-import type { Candidate, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary, Scene, Shot } from './types.ts';
+import type { Candidate, DraftCharacter, DraftShot, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary, Scene, Shot, StoryboardDraft } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
@@ -22,6 +23,8 @@ export type ApiEnv = {
   QWEN_TTS_MODEL?:string;
   QWEN_TTS_FEMALE_VOICE?:string;
   QWEN_TTS_MALE_VOICE?:string;
+  STORYBOARD_LLM_MODEL?:string;
+  STORYBOARD_LLM_BASE_URL?:string;
   TRUST_PROXY?:string;
 };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
@@ -31,6 +34,7 @@ const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
 const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
 const characterGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-character$/;
 const audioGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-audio$/;
+const storyboardPath = /^\/api\/projects\/([a-f0-9-]{36})\/storyboard$/;
 const staleAfter = 10 * 60 * 1000;
 const schemaStatements = [
   'CREATE TABLE IF NOT EXISTS assets (id text PRIMARY KEY NOT NULL, owner text NOT NULL, mime text NOT NULL, name text NOT NULL)',
@@ -91,7 +95,8 @@ function recoverStale(project:Project):Project | null {
     return {...recovered,audio:{...audio,status:'failed' as const,error:'配音生成已中断，请重试。',generationId:null,generationStartedAt:null}};
   });
   const scenes = (project.scenes ?? []).map(recover);
-  return changed ? {...project, shots, scenes} : null;
+  const draftRecovered = recoverStoryboardDraft(project);
+  return changed || draftRecovered ? {...(draftRecovered ?? project), shots, scenes} : null;
 }
 async function loadRecovered(env:ApiEnv,id:string,owner:string):Promise<Project> {
   for (let attempt=0;attempt<5;attempt++) {
@@ -320,6 +325,65 @@ async function handleGenerateAudio(request:Request,env:ApiEnv,owner:string,id:st
   }
 }
 
+async function storyboardResult(env:ApiEnv,owner:string,id:string,generationId:string,output?:{characters:DraftCharacter[];shots:DraftShot[]},error?:string):Promise<Project> {
+  for (let attempt=0;attempt<12;attempt++) {
+    const current=readProject(await rowFor(env,id,owner));
+    const draft=current.storyboardDraft;
+    if (!draft || draft.generationId!==generationId || draft.status!=='generating') fail(409,'Storyboard generation was superseded');
+    const next:StoryboardDraft = output
+      ? {...draft,status:'ready',characters:output.characters,shots:output.shots,error:null,generationId:null,generationStartedAt:null}
+      : {...draft,status:'failed',error:error || 'Storyboard generation failed',generationId:null,generationStartedAt:null};
+    const saved=await saveCas(env,{...current,storyboardDraft:next},owner,current.revision);
+    if (saved) return saved;
+  }
+  fail(409,'Project changed repeatedly; reload and retry');
+}
+
+async function runStoryboardGeneration(env:ApiEnv,owner:string,id:string,generationId:string,story:string,requestedCount:number|null,fetcher?:typeof fetch):Promise<Project> {
+  try {
+    const output=await requestStoryboard({
+      key:env.DASHSCOPE_API_KEY!.trim(),
+      model:env.STORYBOARD_LLM_MODEL,
+      baseUrl:env.STORYBOARD_LLM_BASE_URL,
+      story,
+      requestedCount,
+      fetcher,
+    });
+    return await storyboardResult(env,owner,id,generationId,output);
+  } catch (error) {
+    const message=error instanceof Error ? error.message : 'Storyboard generation failed';
+    await storyboardResult(env,owner,id,generationId,undefined,message).catch(()=>{});
+    throw error instanceof Error ? error : new Error(message);
+  }
+}
+
+async function handleStoryboard(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
+  const body=await bodyJson(request);
+  const story=typeof body.story==='string' ? body.story.trim() : '';
+  const count=body.count ?? null;
+  if (!story || story.length>20000) fail(400,'请粘贴不超过 20000 个字符的故事文本。');
+  if (count!==null && (typeof count!=='number' || !Number.isInteger(count) || count<4 || count>60)) fail(400,'期望镜头数必须是 4–60 的整数。');
+  if (!env.DASHSCOPE_API_KEY?.trim()) fail(503,'请配置百炼 API Key');
+  let generationId='';
+  let startedSaved:Project | null=null;
+  for (let attempt=0;attempt<12 && !startedSaved;attempt++) {
+    const current=await loadRecovered(env,id,owner);
+    if (current.storyboardDraft?.status==='generating') fail(409,'正在拆分，请稍候。');
+    generationId=crypto.randomUUID();
+    const started={...current,storyboardDraft:newStoryboardDraft(story,count,generationId)};
+    startedSaved=await saveCas(env,started,owner,current.revision);
+  }
+  if (!startedSaved) fail(409,'Project changed repeatedly; retry');
+  const generation=runStoryboardGeneration(env,owner,id,generationId,story,count,fetcher);
+  waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  if (waitUntil) return json({project:startedSaved},202);
+  try {
+    return json({project:await generation});
+  } catch (error) {
+    fail(502,error instanceof Error ? error.message : 'Storyboard generation failed');
+  }
+}
+
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
     checkRequestOrigin(request,env.TRUST_PROXY==='1');
@@ -329,8 +393,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
     const owner=(await requireUser(request,env)).id;
-    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public});
-    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-character` || path === `${samplePath}/generate-audio`) {
+    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public,storyboard:{configured:!!env.DASHSCOPE_API_KEY?.trim(),model:env.STORYBOARD_LLM_MODEL?.trim() || DEFAULT_STORYBOARD_MODEL}});
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-character` || path === `${samplePath}/generate-audio` || path === `${samplePath}/storyboard`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }
     if (path === `${samplePath}/copy` && request.method === 'POST') {
@@ -372,8 +436,14 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       const body=await bodyJson(request);
       if (!body || typeof body.name!=='string' || !body.name.trim() || body.name.length>120 || (body.demo!==undefined && typeof body.demo!=='boolean')) fail(400,'Enter a project name');
       if (body.style!==undefined && (typeof body.style!=='string' || !body.style.trim() || body.style.length>500)) fail(400,'Enter a visual style');
-      const project=createProject(body.name,body.demo===true,typeof body.style==='string' ? body.style : undefined);
+      const story=typeof body.story==='string' ? body.story.trim() : '';
+      if (story && story.length>20000) fail(400,'故事文本不能超过 20000 个字符。');
+      if (story && body.count!==undefined && (typeof body.count!=='number' || !Number.isInteger(body.count) || body.count<4 || body.count>60)) fail(400,'期望镜头数必须是 4–60 的整数。');
+      if (story && !env.DASHSCOPE_API_KEY?.trim()) fail(503,'请配置百炼 API Key');
+      const baseProject=createProject(body.name,body.demo===true,typeof body.style==='string' ? body.style : undefined);
+      const project=story ? {...baseProject,storyboardDraft:newStoryboardDraft(story,typeof body.count==='number' ? body.count:null,crypto.randomUUID())} : baseProject;
       await env.DB.prepare('INSERT INTO projects (id, owner, revision, document, updated_at) VALUES (?, ?, ?, ?, ?)').bind(project.id,owner,project.revision,JSON.stringify(project),project.updatedAt).run();
+      if (story) options.waitUntil?.(runStoryboardGeneration(env,owner,project.id,project.storyboardDraft!.generationId!,story,project.storyboardDraft!.requestedCount,options.fetcher).then(()=>undefined,()=>undefined));
       return json({project},201);
     }
     const assetMatch=path.match(uuidPath);
@@ -402,6 +472,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (characterGenerateMatch && request.method==='POST') return await handleGenerateCharacter(request,env,owner,characterGenerateMatch[1],options.fetcher);
     const audioGenerateMatch=path.match(audioGenerationPath);
     if (audioGenerateMatch && request.method==='POST') return await handleGenerateAudio(request,env,owner,audioGenerateMatch[1],options.fetcher,options.waitUntil);
+    const storyboardMatch=path.match(storyboardPath);
+    if (storyboardMatch && request.method==='POST') return await handleStoryboard(request,env,owner,storyboardMatch[1],options.fetcher,options.waitUntil);
     const match=path.match(projectPath);
     if (match && request.method==='GET') return json({project:await loadRecovered(env,match[1],owner)});
     if (match && request.method==='PUT') {
@@ -418,7 +490,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
           return old?.status==='generating' ? {...s,status:old.status,error:old.error,generationId:old.generationId,generationStartedAt:old.generationStartedAt} : {...s,status:s.status==='generating'?'idle':s.status,generationId:null,generationStartedAt:null};
         });
       };
-      const safe:Project={...proposed,createdAt:current.createdAt,shots:protectGeneration(proposed.shots,current.shots),scenes:protectGeneration(proposed.scenes ?? [],current.scenes ?? [])};
+      const safeDraft=current.storyboardDraft?.status==='generating' ? current.storyboardDraft : proposed.storyboardDraft ?? null;
+      const safe:Project={...proposed,createdAt:current.createdAt,shots:protectGeneration(proposed.shots,current.shots),scenes:protectGeneration(proposed.scenes ?? [],current.scenes ?? []),storyboardDraft:safeDraft};
       const existingShots=new Map(current.shots.map(shot=>[shot.id,shot]));
       safe.shots=safe.shots.map(shot=>{
         const old=existingShots.get(shot.id);
