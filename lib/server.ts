@@ -351,7 +351,7 @@ async function runStoryboardGeneration(env:ApiEnv,owner:string,id:string,generat
     });
     return await storyboardResult(env,owner,id,generationId,output);
   } catch (error) {
-    const message=error instanceof Error ? error.message : 'Storyboard generation failed';
+    const message=(error instanceof Error ? error.message : 'Storyboard generation failed').slice(0,500);
     await storyboardResult(env,owner,id,generationId,undefined,message).catch(()=>{});
     throw error instanceof Error ? error : new Error(message);
   }

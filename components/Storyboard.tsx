@@ -7,7 +7,7 @@ import { Modal } from './Modal';
 const MAX_STORY_LENGTH = 20000;
 const nameKey = (name: string) => name.trim().toLowerCase();
 
-export function StoryboardComposer({ busy, configured, initialStory, onClose, onSubmit }: { busy: boolean; configured: boolean; initialStory?: string; onClose: () => void; onSubmit: (story: string, count: number | null) => Promise<void> }) {
+export function StoryboardComposer({ busy, configured, initialStory, onClose, onSubmit }: { busy: boolean; configured: boolean; initialStory?: string; onClose: () => void; onSubmit: (story: string, count: number | null) => Promise<boolean> }) {
   const [story, setStory] = useState(initialStory ?? '');
   const [count, setCount] = useState('');
   const [working, setWorking] = useState(false);
@@ -20,7 +20,7 @@ export function StoryboardComposer({ busy, configured, initialStory, onClose, on
       e.preventDefault();
       if (invalid || working) return;
       setWorking(true);
-      try { await onSubmit(trimmed, parsedCount); onClose(); } finally { setWorking(false); }
+      try { if (await onSubmit(trimmed, parsedCount)) onClose(); } finally { setWorking(false); }
     }}>
       <p className="muted">粘贴一段故事，AI 会拆解成分镜草稿；确认之前不会改动作品。</p>
       <label>故事文本<textarea rows={10} value={story} maxLength={MAX_STORY_LENGTH} onChange={e => setStory(e.target.value)} placeholder="把你的故事粘贴到这里…" /></label>

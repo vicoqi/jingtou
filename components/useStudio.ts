@@ -252,16 +252,17 @@ export function useStudio(authenticated:boolean) {
       if (navigation.version===version) setError(message);
     }
   }
-  async function storyboard(story: string, count: number | null) {
-    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
+  async function storyboard(story: string, count: number | null): Promise<boolean> {
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return false;
     setError('');
     const id = current.current.id;
     const version = navigation.version;
     try {
       await flush();
-      if (current.current?.id !== id || navigation.version !== version) return;
+      if (current.current?.id !== id || navigation.version !== version) return false;
       const result = await generateStoryboard(id, { story, count });
       await receiveGenerationAcknowledgement(result.project, version);
+      return true;
     } catch (e) {
       const message = (e as Error).message;
       try {
@@ -271,6 +272,7 @@ export function useStudio(authenticated:boolean) {
         }
       } catch { /* Keep last loaded data visible. */ }
       if (navigation.version === version) setError(message);
+      return false;
     }
   }
   return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, generateStoryboard: storyboard, remove, removeProject, flush, reload, refreshLibrary };
