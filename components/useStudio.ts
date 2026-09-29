@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Character, GenerationKind, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from '../lib/types';
-import { api, ApiError, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
+import { api, ApiError, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, generateStoryboard, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
 import { rebaseProjectEdits, summarizeProject } from '../lib/domain';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
@@ -116,7 +116,7 @@ export function useStudio(authenticated:boolean) {
     window.addEventListener('popstate', popState);
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
   }, [authenticated,navigation]);
-  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating');
+  const generating = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating') || project?.storyboardDraft?.status === 'generating';
   const projectId = project?.id;
   useEffect(() => {
     if (!generating || working || !projectId) return;
@@ -134,7 +134,7 @@ export function useStudio(authenticated:boolean) {
     if (opened) await refreshList().catch(e => setError(e.message));
     return opened;
   }
-  async function createAndOpen(path: string, body?: { name: string; style?: string }) {
+  async function createAndOpen(path: string, body?: { name: string; style?: string; story?: string; count?: number | null }) {
     if (!authenticated) return false;
     setWorking(true); setError('');
     const version = navigation.version;
@@ -146,7 +146,7 @@ export function useStudio(authenticated:boolean) {
     }
     catch (e) { setError((e as Error).message); return false; } finally { setWorking(false); }
   }
-  const create = (name: string, style: string) => createAndOpen('/api/projects', { name, style });
+  const create = (name: string, style: string, story = '', count: number | null = null) => createAndOpen('/api/projects', story ? { name, style, story, count: count ?? undefined } : { name, style });
   const openSample = () => open(SAMPLE_PROJECT_ID);
   const copySample = () => isReadOnlyProject(current.current)
     ? createAndOpen(`/api/projects/${SAMPLE_PROJECT_ID}/copy`)
@@ -252,5 +252,26 @@ export function useStudio(authenticated:boolean) {
       if (navigation.version===version) setError(message);
     }
   }
-  return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, remove, removeProject, flush, reload, refreshLibrary };
+  async function storyboard(story: string, count: number | null) {
+    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
+    setError('');
+    const id = current.current.id;
+    const version = navigation.version;
+    try {
+      await flush();
+      if (current.current?.id !== id || navigation.version !== version) return;
+      const result = await generateStoryboard(id, { story, count });
+      await receiveGenerationAcknowledgement(result.project, version);
+    } catch (e) {
+      const message = (e as Error).message;
+      try {
+        if (!dirty.current && current.current?.id === id && navigation.version === version) {
+          const result = await getProject(id);
+          if (!dirty.current && current.current?.id === id && navigation.version === version) replace(result.project);
+        }
+      } catch { /* Keep last loaded data visible. */ }
+      if (navigation.version === version) setError(message);
+    }
+  }
+  return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, generateStoryboard: storyboard, remove, removeProject, flush, reload, refreshLibrary };
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_STORYBOARD_MODEL, STORYBOARD_LLM_BASE_URL, buildStoryboardMessages, parseStoryboardPayload, requestStoryboard } from '../lib/storyboard.ts';
+import { DEFAULT_STORYBOARD_MODEL, STORYBOARD_LLM_BASE_URL, parseStoryboardPayload, requestStoryboard } from '../lib/storyboard.ts';
 
 const validPayload = () => ({
   characters: [{ name: '林夏', description: '深蓝短发、珊瑚发带、米白上衣的少女。' }],

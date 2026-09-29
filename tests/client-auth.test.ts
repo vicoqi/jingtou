@@ -10,7 +10,7 @@ test('opening the public homepage never requests private works, libraries or pro
   const [list,config,library]=await loadWorkspace(false);
   assert.equal(calls,0);
   assert.deepEqual(list,{projects:[]});
-  assert.deepEqual(config,{configured:false,model:'',speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}}});
+  assert.deepEqual(config,{configured:false,model:'',speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}},storyboard:{configured:false,model:''}});
   assert.deepEqual(library,{characters:[],scenes:[]});
 });
 
