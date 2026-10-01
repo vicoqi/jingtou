@@ -34,3 +34,18 @@ export function checkRequestOrigin(request:Request,trustProxy=false):void {
     fail(403,'请求来源不匹配，请从本站页面操作。');
   }
 }
+
+// Shared SSRF floor for provider-supplied download URLs: public https hosts only —
+// no localhost-ish names, IP literals, credentials, or non-default ports.
+export function publicHttpsUrl(value: unknown, label: string): URL {
+  if (typeof value !== 'string') throw new Error(`${label} returned an invalid URL`);
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(`${label} returned an invalid URL`); }
+  const hostname = url.hostname.toLowerCase();
+  const localhostish = hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal');
+  const ipLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith('[');
+  if (url.protocol !== 'https:' || localhostish || ipLiteral || url.username || url.password || (url.port && url.port !== '443')) {
+    throw new Error(`${label} returned an invalid URL (${url.protocol}//${hostname || 'empty'})`);
+  }
+  return url;
+}

@@ -25,9 +25,12 @@ export function testEnvironment() {
   const objects = new Map<string, Uint8Array>();
   const env:ApiEnv = { DB:db, ASSETS_BUCKET:{
     put:async (key, body) => { objects.set(key,new Uint8Array(body)); },
-    get:async key => {
+    head:async key => { const bytes=objects.get(key); return bytes ? {size:bytes.byteLength} : null; },
+    get:async (key,options) => {
       const bytes=objects.get(key);
-      return bytes ? {body:new ReadableStream({start(c) { c.enqueue(bytes); c.close(); }}),arrayBuffer:async()=>new Uint8Array(bytes).buffer} : null;
+      if (!bytes) return null;
+      const body=options?.range ? bytes.slice(options.range.offset,options.range.offset+options.range.length) : bytes;
+      return {body:new ReadableStream({start(c) { c.enqueue(body); c.close(); }}),arrayBuffer:async()=>new Uint8Array(body).buffer};
     },
   }};
   return {db,objects,env};

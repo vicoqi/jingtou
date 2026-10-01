@@ -1,4 +1,5 @@
 import type { Character, Project, Scene, Shot } from './types.ts';
+import { publicHttpsUrl } from './http.ts';
 
 export type ImageBytes = { bytes: Uint8Array; mime: 'image/png' | 'image/jpeg' | 'image/webp' };
 export type ReferenceBytes = ImageBytes & { name: string };
@@ -54,7 +55,7 @@ export function buildCharacterPrompt(project:Project,character:Pick<Character,'n
   ].join('\n');
 }
 
-export function buildShotPrompt(project: Project, shot: Shot): string {
+export function buildShotPrompt(project: Project, shot: Shot, frame: 'start' | 'end' = 'start'): string {
   let referenceIndex = 1;
   const characters = shot.characterIds.map(id => {
     const character = project.characters.find(c => c.id === id);
@@ -72,9 +73,25 @@ export function buildShotPrompt(project: Project, shot: Shot): string {
       : 'Create one polished static frame for a short drama. No speech bubbles, subtitles, watermarks, or text.',
     `Visual style: ${project.style || 'anime illustration'}.`,
     `Shot: ${shot.title}. Scene: ${shot.scene}. Action and composition: ${shot.description}.`,
+    frame === 'end'
+      ? 'This image is the END frame of this shot. Depict the requested ending pose and composition as one static instant, not a montage, storyboard grid, multiple poses or an action sequence.'
+      : 'This image is the opening frame of this shot. If the description contains a sequence of actions, depict only the starting state before those actions unfold. Show one instant, not a montage, storyboard grid, multiple poses or the final state of the whole sequence.',
     characters.length ? `Characters (reference images follow in the same order): ${characters.join('; ')}.` : 'No named characters.',
     scene ? `Environment: ${scene.name} (reference image ${referenceIndex}). Setting: ${scene.description}. Use this image for the environment only; preserve its spatial layout, architecture and landmarks while adapting the camera and action to the shot.` : '',
   ].filter(Boolean).join('\n');
+}
+
+export function buildShotEndFramePrompt(project: Project, shot: Shot): string {
+  const description = shot.endFrameDescription?.trim();
+  if (!description) throw new Error('请填写尾帧描述后再生成。');
+  const firstFrame = shot.candidates.find(candidate => candidate.id === shot.selectedCandidateId);
+  if (!firstFrame) throw new Error('请先为当前镜头选定首帧画面。');
+  const firstFrameIndex = shotReferenceUrls(project, shot).length + 1;
+  return [
+    buildShotPrompt(project, { ...shot, description }, 'end'),
+    `Reference image ${firstFrameIndex} is the selected opening frame of this same shot. Preserve its character identities, clothing, accessories, environment layout, lighting and visual style while showing the requested ending pose and composition.`,
+    `Ending state: ${description}. Render one static final instant, not an action sequence or collage.`,
+  ].join('\n');
 }
 
 export async function requestImageEdits(options: { key: string; model: string; baseUrl: string; prompt: string; count: number; aspectRatio: AspectRatio; images: ReferenceBytes[]; fetcher?: typeof fetch }): Promise<ImageBytes[]> {
@@ -108,12 +125,7 @@ export async function requestImageGeneration(options: { key: string; model: stri
 }
 
 function externalImageUrl(value:string):URL | null {
-  let url: URL;
-  try { url = new URL(value); } catch { return null; }
-  const hostname = url.hostname.toLowerCase();
-  if (url.protocol !== 'https:' || hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal')) return null;
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith('[')) return null;
-  return url;
+  try { return publicHttpsUrl(value,'Image provider'); } catch { return null; }
 }
 
 async function parseImageResponse(response:Response,count:number,fetcher:typeof fetch,allowExternalImageUrl=false):Promise<ImageBytes[]> {

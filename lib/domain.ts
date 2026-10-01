@@ -1,6 +1,8 @@
-import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio, StoryboardDraft } from './types.ts';
+import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio, ShotVideo, StoryboardDraft, VideoCandidate, VideoSource } from './types.ts';
 import { newId } from './id.ts';
 import { MAX_PAUSE_DURATION, MAX_SHOT_DURATION } from './shot-timing.ts';
+import { getVideoFrameContext } from './video-frames.ts';
+import { validVideoTrim } from './video-trim.ts';
 
 export const MAX_STORY_LENGTH = 20_000;
 export const MIN_REQUESTED_SHOTS = 4;
@@ -10,8 +12,12 @@ export function emptyShotAudio(): ShotAudio {
   return { url: null, duration: null, sourceText: null, sourceVoice: null, sourceInstruction: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
+export function emptyShotVideo(): ShotVideo {
+  return { candidates: [], selectedVideoId: null, taskId: null, polledAt: null, source: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+}
+
 export function newShot(): Shot {
-  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  return { id: newId(), title: '新镜头', characterIds: [], scene: '', sceneId: null, description: '', endFrameDescription: '', selectedEndCandidateId: null, dialogue: '', showSubtitle: true, voiceInstruction: '', duration: 5, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), video: emptyShotVideo(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
 }
 
 export function newScene(style = ''): Scene {
@@ -22,7 +28,12 @@ export function newStoryboardDraft(story: string, requestedCount: number | null,
   return { status: 'generating', error: null, generationId, generationStartedAt: new Date().toISOString(), story, requestedCount, characters: [], shots: [] };
 }
 
+export const MAX_VIDEO_CANDIDATES = 20;
+
 export const STALE_STORYBOARD_MS = 10 * 60 * 1000;
+// wan3.0 video tasks run minutes (official examples up to 12); stale recovery for
+// video is driven by DashScope task polling in server.ts rather than this cutoff.
+export const STALE_VIDEO_MS = 25 * 60 * 1000;
 
 export function recoverStoryboardDraft(project: Project, now = Date.now()): Project | null {
   const draft = project.storyboardDraft;
@@ -32,6 +43,16 @@ export function recoverStoryboardDraft(project: Project, now = Date.now()): Proj
 
 export function removeScene(project: Project, id: string): Project {
   return { ...project, scenes: (project.scenes ?? []).filter(s => s.id !== id), shots: project.shots.map(s => s.sceneId === id ? { ...s, sceneId: null } : s) };
+}
+
+export function generationDeletionConflict(current:Project,proposed:Project):string|null {
+  for (const shot of current.shots) {
+    if ((shot.status==='generating' || shot.audio.status==='generating' || shot.video.status==='generating') && !proposed.shots.some(item=>item.id===shot.id)) return '生成期间不能删除正在生成的镜头，请等待生成完成。';
+  }
+  for (const scene of current.scenes ?? []) {
+    if (scene.status==='generating' && !proposed.scenes?.some(item=>item.id===scene.id)) return '生成期间不能删除正在生成的场景，请等待生成完成。';
+  }
+  return null;
 }
 
 export function getTimeline(shots: Shot[]): { shot: Shot; start: number; end: number }[] {
@@ -54,10 +75,110 @@ export function isShotAudioStale(project:Project,shot:Shot):boolean {
   return !speaker || shot.audio.sourceText !== shot.dialogue.trim() || shot.audio.sourceVoice !== speaker.voice || shot.audio.sourceInstruction !== shot.voiceInstruction.trim();
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+// Compact fingerprint of the shot inputs a video is generated from. Equal keys mean the
+// stored video still matches the current description/dialogue/duration — hashing keeps
+// per-candidate snapshots at ~20 bytes instead of full text copies.
+export function videoSourceKey(description:string,dialogue:string,duration:number):string {
+  const input=`${description}\u0000${dialogue}\u0000${duration}`;
+  let h1=0x811c9dc5,h2=0x9e3779b9;
+  for (let i=0;i<input.length;i++) {
+    const code=input.charCodeAt(i);
+    h1=Math.imul(h1^code,0x01000193)>>>0;
+    h2=Math.imul(h2+code,0x85ebca6b)>>>0;
+  }
+  return h1.toString(16).padStart(8,'0')+h2.toString(16).padStart(8,'0');
+}
+
+export function shotVideoSource(project: Project, shot: Shot): VideoSource {
+  const { currentFrame, endFrame } = getVideoFrameContext(project, shot);
+  const speaker = project.characters.find(character => character.id === shot.speakerCharacterId);
+  return {
+    sourceMode: 'independent',
+    sourceFirstFrameId: currentFrame?.id ?? '',
+    sourceLastFrameId: endFrame?.id ?? '',
+    sourceDuration: shot.duration,
+    sourceKey: videoSourceKey(JSON.stringify([
+      'independent-frames-v1', currentFrame?.id ?? '', currentFrame?.url ?? '', endFrame?.id ?? '', endFrame?.url ?? '',
+      project.style.trim(), project.aspectRatio, shot.description.trim(), shot.dialogue.trim(), shot.duration,
+      shot.dialogue.trim() ? [shot.speakerCharacterId, speaker?.name ?? '', shot.voiceInstruction.trim()] : null, shot.audioLeadIn,
+    ]), '', shot.duration),
+  };
+}
+
+// Preserve the original fingerprint for videos and tasks made before independent
+// frames. Reading an old project must not change its existing video selections.
+function legacyChainedVideoSource(project: Project, shot: Shot): VideoSource {
+  const { previousShot, previousFrame, currentFrame } = getVideoFrameContext(project, shot);
+  const firstFrame = previousFrame;
+  const lastFrame = currentFrame;
+  const speaker = project.characters.find(character => character.id === shot.speakerCharacterId);
+  return {
+    sourceFirstFrameId: firstFrame?.id ?? '',
+    sourceLastFrameId: lastFrame?.id ?? '',
+    sourcePreviousShotId: previousShot?.id ?? '',
+    sourceDuration: shot.duration,
+    sourceKey: videoSourceKey(JSON.stringify([
+      'frame-chain-v1', previousShot?.id ?? '', firstFrame?.id ?? '', firstFrame?.url ?? '', lastFrame?.id ?? '', lastFrame?.url ?? '',
+      project.style.trim(), project.aspectRatio, shot.description.trim(), shot.dialogue.trim(), shot.duration,
+      shot.dialogue.trim() ? [shot.speakerCharacterId, speaker?.name ?? '', shot.voiceInstruction.trim()] : null, shot.audioLeadIn,
+    ]), '', shot.duration),
+  };
+}
+
+export function isShotVideoStale(shot:Shot,project?:Project):boolean {
+  const video=shot.video;
+  const selected=video.candidates.find(candidate=>candidate.id===video.selectedVideoId);
+  if (!selected) return false;
+  if (selected.sourceMode === 'independent') {
+    if (!project) return true;
+    const source = shotVideoSource(project, shot);
+    return selected.sourceFirstFrameId !== source.sourceFirstFrameId
+      || selected.sourceLastFrameId !== source.sourceLastFrameId || selected.sourceKey !== source.sourceKey;
+  }
+  if (selected.sourceLastFrameId !== undefined || selected.sourcePreviousShotId !== undefined) {
+    if (!project) return true;
+    const source = legacyChainedVideoSource(project, shot);
+    return !!shot.selectedEndCandidateId || selected.sourceFirstFrameId !== source.sourceFirstFrameId
+      || selected.sourceLastFrameId !== source.sourceLastFrameId
+      || selected.sourcePreviousShotId !== source.sourcePreviousShotId
+      || selected.sourceKey !== source.sourceKey;
+  }
+  return !!shot.selectedEndCandidateId || selected.sourceFirstFrameId !== (shot.selectedCandidateId ?? '')
+    || selected.sourceKey !== videoSourceKey(shot.description.trim(),shot.dialogue.trim(),shot.duration);
+}
+
+export const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === 'string';
 const internalImage = (url: unknown): url is string => isString(url) && (/^\/api\/assets\/[a-f0-9-]{36}$/.test(url) || /^\/samples\/(?:summer|linxia|chenyu)\.png$/.test(url));
-const internalAudio = (url: unknown): url is string => isString(url) && /^\/api\/assets\/[a-f0-9-]{36}$/.test(url);
+const internalAssetUrl = (url: unknown): url is string => isString(url) && /^\/api\/assets\/[a-f0-9-]{36}$/.test(url);
+
+function validVideoSource(value: unknown): boolean {
+  return isRecord(value)
+    && (value.sourceMode === undefined || value.sourceMode === 'independent')
+    && isString(value.sourceFirstFrameId) && value.sourceFirstFrameId.length <= 200
+    && (value.sourceLastFrameId === undefined || (isString(value.sourceLastFrameId) && value.sourceLastFrameId.length <= 200))
+    && (value.sourcePreviousShotId === undefined || (isString(value.sourcePreviousShotId) && value.sourcePreviousShotId.length <= 200))
+    && (value.sourceDuration === undefined || (typeof value.sourceDuration === 'number' && Number.isFinite(value.sourceDuration) && value.sourceDuration > 0 && value.sourceDuration <= MAX_SHOT_DURATION))
+    && isString(value.sourceKey) && /^[0-9a-f]{16}$/.test(value.sourceKey);
+}
+
+function normalizeShotVideo(value: unknown): ShotVideo {
+  const base = { ...emptyShotVideo(), ...(isRecord(value) ? value : {}) } as ShotVideo & { candidates: unknown[] };
+  // Candidates written before source keys stored full text snapshots; fold them into the
+  // compact key on read so oversized documents shrink below D1's 1MB row limit.
+  base.candidates = base.candidates.map((candidate: unknown): VideoCandidate => {
+    if (!isRecord(candidate) || typeof candidate.sourceKey === 'string' || !isString(candidate.url)) return candidate as unknown as VideoCandidate;
+    return {
+      id: isString(candidate.id) ? candidate.id : newId(),
+      url: candidate.url,
+      createdAt: isString(candidate.createdAt) ? candidate.createdAt : new Date().toISOString(),
+      duration: typeof candidate.duration === 'number' && Number.isFinite(candidate.duration) ? candidate.duration : null,
+      sourceFirstFrameId: isString(candidate.sourceFirstFrameId) ? candidate.sourceFirstFrameId : '',
+      sourceKey: videoSourceKey(isString(candidate.sourceDescription) ? candidate.sourceDescription : '', isString(candidate.sourceDialogue) ? candidate.sourceDialogue : '', typeof candidate.sourceDuration === 'number' && Number.isFinite(candidate.sourceDuration) ? candidate.sourceDuration : 0),
+    };
+  });
+  return base;
+}
 
 export function normalizeProject(value: unknown): Project {
   if (!isRecord(value)) return value as Project;
@@ -72,17 +193,25 @@ export function normalizeProject(value: unknown): Project {
       : isRecord(shot.audio) && shot.audio.sourceInstruction === undefined
         ? { ...shot.audio, sourceInstruction: shot.audio.url ? '' : null }
         : shot.audio;
+    const video = normalizeShotVideo(shot.video);
     return {
       ...shot,
       showSubtitle: shot.showSubtitle === undefined ? true : shot.showSubtitle,
       voiceInstruction: shot.voiceInstruction === undefined ? '' : shot.voiceInstruction,
+      endFrameDescription: shot.endFrameDescription === undefined ? '' : shot.endFrameDescription,
+      selectedEndCandidateId: shot.selectedEndCandidateId === undefined ? null : shot.selectedEndCandidateId,
       audioLeadIn: shot.audioLeadIn === undefined ? 0 : shot.audioLeadIn,
       audioTailOut: shot.audioTailOut === undefined ? 0 : shot.audioTailOut,
       speakerCharacterId: shot.speakerCharacterId === undefined ? null : shot.speakerCharacterId,
       audio,
+      video,
     };
   }) : value.shots;
   return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots, storyboardDraft: value.storyboardDraft === undefined ? null : value.storyboardDraft } as Project;
+}
+
+function assertSelectedId(selected: unknown, ids: Set<string>, label: string): void {
+  if (!(selected === null || (isString(selected) && ids.has(selected)))) throw new Error(label);
 }
 
 function validateCandidates(value: Record<string, unknown>): void {
@@ -90,9 +219,10 @@ function validateCandidates(value: Record<string, unknown>): void {
   const ids = new Set<string>();
   for (const c of value.candidates) {
     if (!isRecord(c) || !isString(c.id) || !internalImage(c.url) || !isString(c.createdAt) || !isString(c.prompt) || !isString(c.batchId) || !['generated','uploaded','sample'].includes(String(c.source)) || ids.has(c.id)) throw new Error('Invalid candidate');
+    if (c.frame !== undefined && !['start', 'end'].includes(String(c.frame))) throw new Error('Invalid candidate frame');
     ids.add(c.id);
   }
-  if (!(value.selectedCandidateId === null || (isString(value.selectedCandidateId) && ids.has(value.selectedCandidateId)))) throw new Error('Invalid selected candidate');
+  assertSelectedId(value.selectedCandidateId, ids, 'Invalid selected candidate');
 }
 
 function validateStoryboardDraft(value: unknown): void {
@@ -136,16 +266,31 @@ export function validateProject(value: unknown): asserts value is Project {
   for (const s of value.shots) {
     if (!isRecord(s) || !isString(s.id) || !isString(s.title) || !Array.isArray(s.characterIds) || !isString(s.scene) || !isString(s.description) || !isString(s.dialogue) || typeof s.showSubtitle !== 'boolean' || !isString(s.voiceInstruction) || s.voiceInstruction.length > 500 || !Array.isArray(s.candidates) || s.candidates.length > 200 || !['idle','generating','failed'].includes(String(s.status)) || !(s.error === null || isString(s.error)) || !(s.generationId === null || isString(s.generationId)) || !(s.generationStartedAt === null || isString(s.generationStartedAt)) || shotIds.has(s.id)) throw new Error('Invalid shot');
     shotIds.add(s.id);
+    if (s.endFrameDescription !== undefined && (!isString(s.endFrameDescription) || s.endFrameDescription.length > 4000)) throw new Error('Invalid end frame description');
+    if (s.generationFrame !== undefined && !['start', 'end'].includes(String(s.generationFrame))) throw new Error('Invalid image generation frame');
     if (!Number.isFinite(s.duration) || Number(s.duration) <= 0 || Number(s.duration) > MAX_SHOT_DURATION) throw new Error('Invalid shot duration');
     if ([s.audioLeadIn,s.audioTailOut].some(pause=>typeof pause!=='number' || !Number.isFinite(pause) || pause<0 || pause>MAX_PAUSE_DURATION)) throw new Error('Invalid dialogue pause');
     if (s.characterIds.some((id: unknown) => !isString(id) || !characterIds.has(id))) throw new Error('Invalid shot character');
     if (!(s.speakerCharacterId === null || (isString(s.speakerCharacterId) && s.characterIds.includes(s.speakerCharacterId)))) throw new Error('Invalid shot speaker');
     if (s.sceneId !== undefined && s.sceneId !== null && (!isString(s.sceneId) || !sceneIds.has(s.sceneId))) throw new Error('Invalid shot scene');
-    if (!isRecord(s.audio) || !['idle','generating','failed'].includes(String(s.audio.status)) || !(s.audio.url === null || internalAudio(s.audio.url)) || !(s.audio.duration === null || (Number.isFinite(s.audio.duration) && Number(s.audio.duration) > 0 && Number(s.audio.duration) <= 3600)) || !(s.audio.sourceText === null || (isString(s.audio.sourceText) && s.audio.sourceText.length <= 1000)) || !(s.audio.sourceVoice === null || ['female','male'].includes(String(s.audio.sourceVoice))) || !(s.audio.sourceInstruction === null || (isString(s.audio.sourceInstruction) && s.audio.sourceInstruction.length <= 500)) || !(s.audio.error === null || isString(s.audio.error)) || !(s.audio.generationId === null || isString(s.audio.generationId)) || !(s.audio.generationStartedAt === null || isString(s.audio.generationStartedAt))) throw new Error('Invalid shot audio');
+    if (!isRecord(s.audio) || !['idle','generating','failed'].includes(String(s.audio.status)) || !(s.audio.url === null || internalAssetUrl(s.audio.url)) || !(s.audio.duration === null || (Number.isFinite(s.audio.duration) && Number(s.audio.duration) > 0 && Number(s.audio.duration) <= 3600)) || !(s.audio.sourceText === null || (isString(s.audio.sourceText) && s.audio.sourceText.length <= 1000)) || !(s.audio.sourceVoice === null || ['female','male'].includes(String(s.audio.sourceVoice))) || !(s.audio.sourceInstruction === null || (isString(s.audio.sourceInstruction) && s.audio.sourceInstruction.length <= 500)) || !(s.audio.error === null || isString(s.audio.error)) || !(s.audio.generationId === null || isString(s.audio.generationId)) || !(s.audio.generationStartedAt === null || isString(s.audio.generationStartedAt))) throw new Error('Invalid shot audio');
     if (s.audio.url !== null && (s.audio.duration === null || s.audio.sourceText === null || s.audio.sourceVoice === null || s.audio.sourceInstruction === null)) throw new Error('Invalid shot audio');
     if (s.audio.url === null && (s.audio.duration !== null || s.audio.sourceText !== null || s.audio.sourceVoice !== null || s.audio.sourceInstruction !== null)) throw new Error('Invalid shot audio');
     if (s.audio.status === 'generating' && (!s.audio.generationId || !s.audio.generationStartedAt)) throw new Error('Invalid shot audio generation');
+    const v = s.video;
+    if (!isRecord(v) || !Array.isArray(v.candidates) || v.candidates.length > MAX_VIDEO_CANDIDATES || !['idle','generating','failed'].includes(String(v.status)) || !(v.taskId === null || isString(v.taskId)) || !(v.polledAt === null || isString(v.polledAt)) || !(v.error === null || isString(v.error)) || !(v.generationId === null || isString(v.generationId)) || !(v.generationStartedAt === null || isString(v.generationStartedAt))) throw new Error('Invalid shot video');
+    if (v.source !== undefined && v.source !== null && !validVideoSource(v.source)) throw new Error('Invalid shot video source');
+    const videoIds = new Set<string>();
+    for (const c of v.candidates as unknown[]) {
+      if (!isRecord(c) || !isString(c.id) || !internalAssetUrl(c.url) || !isString(c.createdAt) || !(c.duration === null || (Number.isFinite(c.duration) && Number(c.duration) > 0 && Number(c.duration) <= 3600)) || !validVideoSource(c) || videoIds.has(c.id)) throw new Error('Invalid shot video');
+      if ((c.trimStart !== undefined && typeof c.trimStart !== 'number') || (c.trimEnd !== undefined && typeof c.trimEnd !== 'number') || !validVideoTrim(c as VideoCandidate)) throw new Error('视频裁剪时间无效，请至少保留 0.1 秒。');
+      videoIds.add(c.id);
+    }
+    assertSelectedId(v.selectedVideoId, videoIds, 'Invalid shot video');
+    if (v.status === 'generating' && (!v.generationId || !v.generationStartedAt)) throw new Error('Invalid shot video generation');
+    if (v.status !== 'generating' && (v.generationId !== null || v.generationStartedAt !== null)) throw new Error('Invalid shot video generation');
     validateCandidates(s);
+    assertSelectedId(s.selectedEndCandidateId ?? null, new Set(s.candidates.map((c:Candidate) => c.id)), 'Invalid selected end frame');
   }
 }
 
@@ -185,7 +330,15 @@ export function rebaseProjectEdits(local:Project,remote:Project):Project {
     storyboardDraft:remote.storyboardDraft ?? null,
     shots:local.shots.map(shot=>{
       const remoteShot=remoteShots.get(shot.id);
-      return remoteShot ? {...mergeGeneratedFrame(shot,remoteShot),audio:remoteShot.audio} : shot;
+      if (!remoteShot) return shot;
+      const localVideos = new Map(shot.video.candidates.map(candidate=>[candidate.id,candidate]));
+      const candidates = remoteShot.video.candidates.map(candidate=>{
+        const localCandidate=localVideos.get(candidate.id);
+        return localCandidate ? {...candidate,trimStart:localCandidate.trimStart ?? 0,trimEnd:localCandidate.trimEnd ?? 0} : candidate;
+      });
+      const selectedVideoId=shot.video.selectedVideoId && candidates.some(candidate=>candidate.id===shot.video.selectedVideoId)
+        ? shot.video.selectedVideoId : remoteShot.video.selectedVideoId;
+      return {...mergeGeneratedFrame(shot,remoteShot),generationFrame:remoteShot.generationFrame,audio:remoteShot.audio,video:{...remoteShot.video,candidates,selectedVideoId}};
     }),
     scenes:(local.scenes ?? []).map(scene=>{
       const remoteScene=remoteScenes.get(scene.id);

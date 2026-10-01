@@ -1,7 +1,7 @@
 import type { AuthUser, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from './types';
 
-export type WorkspaceConfig = { configured:boolean; model:string; speech:{configured:boolean;id:'qwen';provider:string;model:string;voices:{female:string;male:string}}; storyboard:{configured:boolean;model:string} };
-export const EMPTY_WORKSPACE_CONFIG:WorkspaceConfig = { configured:false, model:'', speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}}, storyboard:{configured:false,model:''} };
+export type WorkspaceConfig = { configured:boolean; model:string; speech:{configured:boolean;id:'qwen';provider:string;model:string;voices:{female:string;male:string}}; storyboard:{configured:boolean;model:string}; video:{configured:boolean;model:string} };
+export const EMPTY_WORKSPACE_CONFIG:WorkspaceConfig = { configured:false, model:'', speech:{configured:false,id:'qwen',provider:'阿里云百炼',model:'qwen3-tts-instruct-flash',voices:{female:'女声',male:'男声'}}, storyboard:{configured:false,model:''}, video:{configured:false,model:'wan3.0-video'} };
 
 let currentUserId:string | null=null;
 export function setClientUser(user:AuthUser | null):void { currentUserId=user?.id ?? null; }
@@ -35,6 +35,7 @@ export const getProject = (id: string) => api<{ project: Project }>(`/api/projec
 export const saveProject = (project: Project) => api<{ project: Project }>(`/api/projects/${project.id}`, { method: 'PUT', body: JSON.stringify({ project }) });
 export const generateCharacterImages = (projectId:string,input:{name:string;description:string;count:number}) => api<{images:ReferenceImage[]}>(`/api/projects/${projectId}/generate-character`,{method:'POST',body:JSON.stringify(input)});
 export const generateShotAudio = (projectId:string,shotId:string) => api<{project:Project}>(`/api/projects/${projectId}/generate-audio`,{method:'POST',body:JSON.stringify({shotId})});
+export const generateShotVideo = (projectId:string,shotId:string) => api<{project:Project}>(`/api/projects/${projectId}/generate-video`,{method:'POST',body:JSON.stringify({shotId})});
 export const generateStoryboard = (projectId:string,input:{story:string;count:number|null}) => api<{project:Project}>(`/api/projects/${projectId}/storyboard`,{method:'POST',body:JSON.stringify(input)});
 export async function uploadImage(file: File) {
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('请选择 PNG、JPG 或 WebP 图片。');

@@ -1,11 +1,16 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Character, GenerationKind, Project, ProjectSummary, ReferenceImage, ResourceLibrary } from '../lib/types';
-import { api, ApiError, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, generateStoryboard, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
-import { rebaseProjectEdits, summarizeProject } from '../lib/domain';
+import type { Character, GenerationKind, Project, ProjectSummary, ReferenceImage, ResourceLibrary, VideoSource } from '../lib/types';
+import { api, ApiError, EMPTY_WORKSPACE_CONFIG, generateCharacterImages, generateShotAudio, generateShotVideo, generateStoryboard, getProject, getResourceLibrary, listProjects, loadWorkspace, saveProject } from '../lib/client';
+import { generationDeletionConflict, rebaseProjectEdits, shotVideoSource, summarizeProject } from '../lib/domain';
+import { videoFrameEditConflict } from '../lib/video-frames';
 import { createProjectNavigation, projectIdFromLocation, projectLocation } from '../lib/navigation';
 import { canDeleteProject, isReadOnlyProject, SAMPLE_PROJECT_ID } from '../lib/project-access';
 import { isWorkspaceBusy, mergeGenerationAcknowledgement, selectNewerProject } from '../lib/workspace-state';
+import { newId } from '../lib/id';
+
+type PendingShotJob = { projectId:string; shotId:string; kind:GenerationKind|'audio'|'video'; frame?:'start'|'end'; generationId:string; startedAt:string; source?:VideoSource };
+const pendingGenerationState = (job:PendingShotJob) => ({status:'generating' as const,error:null,generationId:job.generationId,generationStartedAt:job.startedAt});
 
 export function useStudio(authenticated:boolean) {
   const [project, setProject] = useState<Project | null>(null);
@@ -24,7 +29,22 @@ export function useStudio(authenticated:boolean) {
   const pending = useRef<Promise<void> | null>(null);
   const alive = useRef(true);
   const libraryRequest = useRef(0);
-  const replace = useCallback((p: Project | null) => { current.current = p; setProject(p); }, []);
+  const pendingShotJobs = useRef(new Map<string,PendingShotJob>());
+  const replace = useCallback((p: Project | null) => {
+    // Another job's acknowledgement, a poll, or a save conflict can arrive before
+    // this POST returns. Retain its optimistic locks until its own response arrives.
+    const jobs=[...pendingShotJobs.current.values()].filter(job=>job.projectId===p?.id);
+    const next=p && jobs.length ? {...p,
+      shots:p.shots.map(shot=>jobs.filter(job=>job.kind!=='scenes' && job.shotId===shot.id).reduce((item,job)=>{
+        if (job.kind==='shots') return {...item,...pendingGenerationState(job),generationFrame:job.frame};
+        if (job.kind==='audio' || job.kind==='video') return {...item,[job.kind]:{...item[job.kind],...pendingGenerationState(job),...(job.kind==='video' ? {source:job.source} : {})}};
+        return item;
+      },shot)),
+      scenes:(p.scenes ?? []).map(scene=>jobs.filter(job=>job.kind==='scenes' && job.shotId===scene.id).reduce((item,job)=>({...item,...pendingGenerationState(job)}),scene)),
+    } : p;
+    current.current = next;
+    setProject(next);
+  }, []);
   const refreshList = useCallback(async () => { if (!authenticated) return; const result = await listProjects(); if (alive.current) setProjects(result.projects); }, [authenticated]);
   const refreshLibrary = useCallback(async () => {
     if (!authenticated) return;
@@ -77,7 +97,10 @@ export function useStudio(authenticated:boolean) {
   }, [replace, refreshLibrary]);
   const update = useCallback((fn: (p: Project) => Project) => {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
-    replace(fn(current.current)); dirty.current = true; setSaveState('等待保存…');
+    const proposed=fn(current.current);
+    const conflict=videoFrameEditConflict(current.current,proposed) || generationDeletionConflict(current.current,proposed);
+    if (conflict) { setError(conflict); return; }
+    replace(proposed); dirty.current = true; setSaveState('等待保存…');
     clearTimeout(timer.current); timer.current = setTimeout(() => { void flush().catch(() => {}); }, 600);
   }, [authenticated, replace, flush]);
   const writeLocation = useCallback((id: string | null, mode: 'push' | 'replace') => {
@@ -117,16 +140,19 @@ export function useStudio(authenticated:boolean) {
     return () => { active = false; alive.current = false; navigation.cancel(); clearTimeout(timer.current); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('popstate', popState); };
   }, [authenticated,navigation]);
   const generatingFrames = [...(project?.shots ?? []), ...(project?.scenes ?? [])].some(s => s.status === 'generating') || (project?.shots ?? []).some(s=>s.audio.status==='generating');
+  const generatingVideos = (project?.shots ?? []).some(s=>s.video.status==='generating');
   const storyboardGenerating = project?.storyboardDraft?.status === 'generating';
-  const generating = generatingFrames || storyboardGenerating;
+  const generating = generatingFrames || generatingVideos || storyboardGenerating;
   const projectId = project?.id;
   useEffect(() => {
     if (!generating || working || !projectId) return;
-    // Storyboard LLM calls run 30–60s with no intermediate state to show; poll slower than image/audio jobs.
+    // Storyboard LLM calls run 30–60s and wan video tasks run minutes with no intermediate
+    // state to show; poll slower than image/audio jobs. Video polls also trigger server-side
+    // task queries, so a longer interval keeps provider traffic reasonable.
     const interval = setInterval(() => {
       if (dirty.current || pending.current) return;
       void getProject(projectId).then(r => { if (current.current?.id === projectId && !dirty.current && !pending.current) replace(selectNewerProject(current.current,r.project)); }).catch(e => setError(e.message));
-    }, storyboardGenerating && !generatingFrames ? 8000 : 3000);
+    }, generatingFrames ? 3000 : storyboardGenerating ? 8000 : 10000);
     return () => clearInterval(interval);
   }, [generating, generatingFrames, storyboardGenerating, working, projectId, replace]);
   async function open(id: string) {
@@ -165,30 +191,11 @@ export function useStudio(authenticated:boolean) {
     await saving?.catch(()=>{});
     if (current.current?.id===incoming.id && navigation.version===version && dirty.current) await flush();
   }
-  async function generate(shotId: string, count: number, kind: GenerationKind = 'shots') {
-    if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
-    setError('');
-    const id = current.current.id;
-    const version = navigation.version;
-    try {
-      await flush();
-      if (current.current?.id !== id || navigation.version !== version) return;
-      replace({ ...current.current!, [kind]: (current.current![kind] ?? []).map(s => s.id === shotId ? { ...s, status: 'generating', error: null } : s) });
-      const endpoint = kind === 'scenes' ? 'generate-scene' : 'generate';
-      const target = kind === 'scenes' ? { sceneId: shotId } : { shotId };
-      const result = await api<{ project: Project }>(`/api/projects/${id}/${endpoint}`, { method: 'POST', body: JSON.stringify({ ...target, count }) });
-      await receiveGenerationAcknowledgement(result.project,version);
-      await refreshList(); void refreshLibrary();
-    } catch (e) {
-      const message = (e as Error).message;
-      try {
-        if (!dirty.current && current.current?.id === id && navigation.version === version) {
-          const result = await getProject(id);
-          if (!dirty.current && current.current?.id === id && navigation.version === version) replace(result.project);
-        }
-      } catch { /* Keep last loaded data visible. */ }
-      if (navigation.version === version) setError(message);
-    }
+  async function generate(shotId: string, count: number, kind: GenerationKind = 'shots', frame: 'start' | 'end' = 'start') {
+    const endpoint = kind === 'scenes' ? 'generate-scene' : 'generate';
+    const target = kind === 'scenes' ? { sceneId: shotId } : { shotId };
+    await submitShotJob(shotId,kind,id=>api<{project:Project}>(`/api/projects/${id}/${endpoint}`,{method:'POST',body:JSON.stringify({...target,count,...(kind==='shots' ? {frame} : {})})}),frame);
+    void refreshLibrary();
   }
   async function removeProject(id: string):Promise<boolean> {
     if (!authenticated) return false;
@@ -215,6 +222,7 @@ export function useStudio(authenticated:boolean) {
     catch (e) { setError((e as Error).message); } finally { setWorking(false); }
   }
   const generateScene = (sceneId: string, count: number) => generate(sceneId, count, 'scenes');
+  const generateEndFrame = (shotId: string, count: number) => generate(shotId, count, 'shots', 'end');
   async function generateCharacter(draft:Pick<Character,'name'|'description'>,count:number):Promise<ReferenceImage[]> {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) throw new Error('当前作品不能生成角色参考图。');
     setWorking(true); setError('');
@@ -232,28 +240,46 @@ export function useStudio(authenticated:boolean) {
       throw e instanceof Error ? e : new Error(message);
     } finally { setWorking(false); }
   }
-  async function generateAudio(shotId:string) {
+  async function submitShotJob(shotId:string,kind:GenerationKind|'audio'|'video',call:(id:string)=>Promise<{project:Project}>,frame?:'start'|'end') {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return;
     setError('');
     const id=current.current.id;
     const version=navigation.version;
+    const jobKey=`${id}:${shotId}:${kind}`;
+    if (pendingShotJobs.current.has(jobKey)) return;
+    let job:PendingShotJob | null=null;
+    const clearJob=()=>{ if (job && pendingShotJobs.current.get(jobKey)===job) pendingShotJobs.current.delete(jobKey); };
     try {
       await flush();
       if (current.current?.id!==id || navigation.version!==version) return;
-      replace({...current.current,shots:current.current.shots.map(shot=>shot.id===shotId ? {...shot,audio:{...shot.audio,status:'generating',error:null}} : shot)});
-      const result=await generateShotAudio(id,shotId);
+      const shot=current.current.shots.find(item=>item.id===shotId);
+      const state=kind==='shots' ? shot : kind==='scenes' ? current.current.scenes?.find(item=>item.id===shotId) : shot?.[kind];
+      if (!state || state.status==='generating' || pendingShotJobs.current.has(jobKey)) return;
+      job={projectId:id,shotId,kind,generationId:newId(),startedAt:new Date().toISOString(),
+        ...(kind==='shots' ? {frame} : {}),...(kind==='video' ? {source:shotVideoSource(current.current,shot!)} : {})};
+      pendingShotJobs.current.set(jobKey,job);
+      replace(current.current);
+      const result=await call(id);
+      clearJob();
       await receiveGenerationAcknowledgement(result.project,version);
       await refreshList();
     } catch (e) {
+      clearJob();
       const message=(e as Error).message;
       try {
-        if (!dirty.current && current.current?.id===id && navigation.version===version) {
+        if (current.current?.id===id && navigation.version===version) {
           const result=await getProject(id);
-          if (!dirty.current && current.current?.id===id && navigation.version===version) replace(result.project);
+          if (current.current?.id===id && navigation.version===version) replace(mergeGenerationAcknowledgement(current.current,result.project,dirty.current || !!pending.current));
         }
       } catch { /* Keep last loaded data visible. */ }
       if (navigation.version===version) setError(message);
     }
+  }
+  async function generateAudio(shotId:string) {
+    await submitShotJob(shotId,'audio',id=>generateShotAudio(id,shotId));
+  }
+  async function generateVideo(shotId:string) {
+    await submitShotJob(shotId,'video',id=>generateShotVideo(id,shotId));
   }
   async function storyboard(story: string, count: number | null): Promise<boolean> {
     if (!authenticated || !current.current || isReadOnlyProject(current.current)) return false;
@@ -278,5 +304,5 @@ export function useStudio(authenticated:boolean) {
       return false;
     }
   }
-  return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateScene, generateCharacter, generateAudio, generateStoryboard: storyboard, remove, removeProject, flush, reload, refreshLibrary };
+  return { project, projects, library, libraryLoading, loading, busy: isWorkspaceBusy({working,navigating,generating}), readOnly: isReadOnlyProject(project), saveState, error, setError, config, update, open, openSample, copySample, home, create, generate, generateEndFrame, generateScene, generateCharacter, generateAudio, generateVideo, generateStoryboard: storyboard, remove, removeProject, flush, reload, refreshLibrary };
 }

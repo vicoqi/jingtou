@@ -1,16 +1,22 @@
-import { buildCharacterPrompt, buildScenePrompt, buildShotPrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
-import { mergeGeneration, newStoryboardDraft, normalizeProject, recoverStoryboardDraft, summarizeProject, validateProject, MAX_REQUESTED_SHOTS, MIN_REQUESTED_SHOTS, MAX_STORY_LENGTH, STALE_STORYBOARD_MS } from './domain.ts';
+import { buildCharacterPrompt, buildScenePrompt, buildShotPrompt, buildShotEndFramePrompt, shotReferenceUrls, detectImageMime, requestImageEdits, requestImageGeneration, type ReferenceBytes } from './generation.ts';
+import { generationDeletionConflict, mergeGeneration, newStoryboardDraft, normalizeProject, recoverStoryboardDraft, summarizeProject, validateProject, shotVideoSource, videoSourceKey, MAX_REQUESTED_SHOTS, MIN_REQUESTED_SHOTS, MAX_STORY_LENGTH, MAX_VIDEO_CANDIDATES, STALE_STORYBOARD_MS, STALE_VIDEO_MS } from './domain.ts';
 import { createSpeechProvider, DEFAULT_QWEN_TTS_MODEL, type SpeechProvider } from './speech.ts';
 import { DEFAULT_STORYBOARD_MODEL, requestStoryboard } from './storyboard.ts';
+import { buildVideoPrompt, checkWanVideoTask, clampVideoDuration, DEFAULT_WAN_VIDEO_MODEL, downloadWanVideo, submitWanVideoTask, type FirstFrameImage } from './video.ts';
+import { getVideoFrameContext, videoFrameEditConflict } from './video-frames.ts';
 import { createProject, createSamplePreview } from './sample.ts';
 import { SAMPLE_PROJECT_ID } from './project-access.ts';
 import { authSchemaStatements, handleAuth, requireUser } from './auth.ts';
 import { ApiError, bodyJson, checkRequestOrigin, fail, json } from './http.ts';
-import type { Candidate, DraftCharacter, DraftShot, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary, Scene, Shot, StoryboardDraft } from './types.ts';
+import type { Candidate, DraftCharacter, DraftShot, GeneratedFrame, GenerationKind, Project, ReferenceImage, ResourceLibrary, Scene, Shot, ShotVideo, StoryboardDraft, VideoCandidate, VideoSource } from './types.ts';
 
 type Statement = { bind(...args: unknown[]): { first<T>(): Promise<T | null>; all<T>(): Promise<{results:T[]}>; run(): Promise<{meta:{changes:number}}> } };
 type D1 = { prepare(sql: string): Statement };
-type Bucket = { put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null> };
+type Bucket = {
+  put(key:string, body:Uint8Array, options?:unknown):Promise<unknown>;
+  head(key:string):Promise<{size:number} | null>;
+  get(key:string,options?:{range:{offset:number;length:number}}):Promise<{body:ReadableStream; arrayBuffer():Promise<ArrayBuffer>} | null>;
+};
 export type ApiEnv = {
   DB:D1;
   ASSETS_BUCKET:Bucket;
@@ -25,6 +31,8 @@ export type ApiEnv = {
   QWEN_TTS_MALE_VOICE?:string;
   STORYBOARD_LLM_MODEL?:string;
   STORYBOARD_LLM_BASE_URL?:string;
+  WAN_VIDEO_MODEL?:string;
+  WAN_VIDEO_BASE_URL?:string;
   TRUST_PROXY?:string;
 };
 type ProjectRow = { id:string; owner:string; revision:number; document:string; updated_at:string };
@@ -34,6 +42,7 @@ const projectPath = /^\/api\/projects\/([a-f0-9-]{36})$/;
 const generationPath = /^\/api\/projects\/([a-f0-9-]{36})\/(generate|generate-scene)$/;
 const characterGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-character$/;
 const audioGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-audio$/;
+const videoGenerationPath = /^\/api\/projects\/([a-f0-9-]{36})\/generate-video$/;
 const storyboardPath = /^\/api\/projects\/([a-f0-9-]{36})\/storyboard$/;
 
 const schemaStatements = [
@@ -110,19 +119,27 @@ async function loadRecovered(env:ApiEnv,id:string,owner:string):Promise<Project>
 }
 
 async function validateOwnedAssets(env:ApiEnv,project:Project,owner:string):Promise<void> {
-  const urls = new Map<string,'image'|'audio'>();
+  const urls = new Map<string,'image'|'audio'|'video'>();
   for (const c of project.characters) for (const r of c.references) urls.set(r.url,'image');
   for (const s of project.shots) {
     for (const c of s.candidates) urls.set(c.url,'image');
     if (s.audio.url) urls.set(s.audio.url,'audio');
+    for (const c of s.video.candidates) urls.set(c.url,'video');
   }
   for (const s of project.scenes ?? []) for (const c of s.candidates) urls.set(c.url,'image');
+  const owned = new Map<string,AssetRow>();
+  const uuids = [...new Set([...urls.keys()].map(url => url.match(uuidPath)?.[1]).filter((id): id is string => !!id))];
+  for (let offset = 0; offset < uuids.length; offset += 50) {
+    const batch = uuids.slice(offset, offset + 50);
+    const rows=(await env.DB.prepare(`SELECT id, owner, mime, name FROM assets WHERE id IN (${batch.map(() => '?').join(',')}) AND owner = ?`).bind(...batch,owner).all<AssetRow>()).results;
+    for (const row of rows) owned.set(row.id,row);
+  }
   for (const [url,kind] of urls) {
     const match=url.match(uuidPath);
     if (!match) continue;
-    const asset=await env.DB.prepare('SELECT id, owner, mime, name FROM assets WHERE id = ? AND owner = ?').bind(match[1],owner).first<AssetRow>();
+    const asset=owned.get(match[1]);
     if (!asset || asset.owner !== owner) fail(400,'作品使用了不属于当前账号的素材');
-    if ((kind === 'image' && !asset.mime.startsWith('image/')) || (kind === 'audio' && asset.mime !== 'audio/wav')) fail(400,'作品素材类型不正确');
+    if ((kind === 'image' && !asset.mime.startsWith('image/')) || (kind === 'audio' && asset.mime !== 'audio/wav') || (kind === 'video' && asset.mime !== 'video/mp4')) fail(400,'作品素材类型不正确');
   }
 }
 
@@ -164,6 +181,8 @@ async function generationResult(env:ApiEnv,owner:string,id:string,shotId:string,
 async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,kind:GenerationKind,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
   const body=await bodyJson(request);
   const count=body.count;
+  if (body.frame !== undefined && (kind !== 'shots' || !['start', 'end'].includes(String(body.frame)))) fail(400,'画面类型无效。');
+  const frame: 'start' | 'end' = body.frame === 'end' ? 'end' : 'start';
   const targetId = kind === 'scenes' ? body.sceneId : body.shotId;
   if (typeof targetId!=='string' || typeof count!=='number' || !Number.isInteger(count) || count<1 || count>4) fail(400,'请选择镜头或场景，并生成 1–4 张图片。');
   const key=env.IMAGE_API_KEY || env.OPENAI_API_KEY;
@@ -184,14 +203,15 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
     if (found.candidates.length + count > 200) fail(400,'最多保留 200 张候选图。');
     let imageUrls:string[];
     try {
-      prompt='name' in found ? buildScenePrompt(current,found) : buildShotPrompt(current,found);
+      prompt='name' in found ? buildScenePrompt(current,found) : frame === 'end' ? buildShotEndFramePrompt(current,found) : buildShotPrompt(current,found);
       imageUrls='name' in found ? [] : shotReferenceUrls(current,found);
+      if (kind === 'shots' && frame === 'end') imageUrls.push((found as Shot).candidates.find(candidate=>candidate.id===found.selectedCandidateId)!.url);
     } catch (error) { fail(400,error instanceof Error ? error.message : '生成设定无效。'); }
     images=await Promise.all(imageUrls.map(url=>getReference(env,url,owner,request.url)));
     generationId=crypto.randomUUID();
     target=found;
     aspectRatio=current.aspectRatio;
-    const started={...current,[kind]:items.map(item=>item.id===found.id ? {...item,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString()}:item)};
+    const started={...current,[kind]:items.map(item=>item.id===found.id ? {...item,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString(),...(kind === 'shots' ? {generationFrame:frame} : {})}:item)};
     startedSaved=await saveCas(env,started,owner,current.revision);
   }
   if (!startedSaved) fail(409,'Project changed repeatedly; retry');
@@ -205,7 +225,7 @@ async function handleGenerate(request:Request,env:ApiEnv,owner:string,id:string,
       const assetId=crypto.randomUUID();
       await env.ASSETS_BUCKET.put(assetId,result.bytes,{httpMetadata:{contentType:result.mime}});
       await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,result.mime,`${'name' in target ? target.name : target.title}.${result.mime.split('/')[1]}`).run();
-      candidates.push({id:crypto.randomUUID(),url:`/api/assets/${assetId}`,createdAt:now,prompt,batchId:generationId,source:'generated'});
+      candidates.push({id:crypto.randomUUID(),url:`/api/assets/${assetId}`,createdAt:now,prompt,batchId:generationId,source:'generated',...(kind === 'shots' ? {frame} : {})});
     }
       return await generationResult(env,owner,id,target.id,generationId,candidates,kind);
     } catch (error) {
@@ -384,6 +404,206 @@ async function handleStoryboard(request:Request,env:ApiEnv,owner:string,id:strin
   }
 }
 
+function resolveVideoRuntime(env:ApiEnv):{key:string | null;model:string;baseUrl:string | undefined;public:{configured:boolean;model:string}} {
+  const key=env.DASHSCOPE_API_KEY?.trim() || null;
+  const model=env.WAN_VIDEO_MODEL?.trim() || DEFAULT_WAN_VIDEO_MODEL;
+  return { key, model, baseUrl: env.WAN_VIDEO_BASE_URL, public: { configured: !!key, model } };
+}
+
+async function saveShotVideo(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,update:(video:ShotVideo)=>ShotVideo):Promise<Project> {
+  for (let attempt=0;attempt<12;attempt++) {
+    const current=readProject(await rowFor(env,id,owner));
+    const shot=current.shots.find(item=>item.id===shotId);
+    if (!shot || shot.video.generationId!==generationId || shot.video.status!=='generating') fail(409,'Video generation was superseded');
+    const merged={...current,shots:current.shots.map(item=>item.id===shotId ? {...item,video:update(shot.video)} : item)};
+    const saved=await saveCas(env,merged,owner,current.revision);
+    if (saved) return saved;
+  }
+  fail(409,'Project changed repeatedly; reload and retry');
+}
+
+async function videoGenerationResult(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,candidate?:VideoCandidate,error?:string):Promise<Project> {
+  return saveShotVideo(env,owner,id,shotId,generationId,video=>candidate
+    ? {...video,candidates:[...video.candidates,candidate],selectedVideoId:video.selectedVideoId ?? candidate.id,status:'idle',error:null,generationId:null,generationStartedAt:null,taskId:null,polledAt:null,source:null}
+    : {...video,status:'failed',error:error || '视频生成失败',generationId:null,generationStartedAt:null,taskId:null,polledAt:null,source:null});
+}
+
+async function videoTaskAssigned(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,taskId:string):Promise<Project> {
+  return saveShotVideo(env,owner,id,shotId,generationId,video=>({...video,taskId,error:null,polledAt:new Date().toISOString()}));
+}
+
+async function deferVideoTask(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,taskId:string,error='视频状态查询或下载暂时失败，将自动重试。'):Promise<Project> {
+  return saveShotVideo(env,owner,id,shotId,generationId,video=>({...video,taskId,error,polledAt:new Date().toISOString()}));
+}
+
+async function storeVideoAsset(env:ApiEnv,owner:string,shotTitle:string,videoUrl:string,fetcher?:typeof fetch):Promise<string> {
+  const downloaded=await downloadWanVideo(videoUrl,fetcher);
+  const assetId=crypto.randomUUID();
+  await env.ASSETS_BUCKET.put(assetId,downloaded.bytes,{httpMetadata:{contentType:downloaded.mime}});
+  await env.DB.prepare('INSERT INTO assets (id, owner, mime, name) VALUES (?, ?, ?, ?)').bind(assetId,owner,downloaded.mime,`${shotTitle || '镜头视频'}.mp4`.slice(0,200)).run();
+  return `/api/assets/${assetId}`;
+}
+
+async function serveVideoAsset(request:Request,env:ApiEnv,asset:AssetRow):Promise<Response> {
+  const metadata=await env.ASSETS_BUCKET.head(asset.id);
+  if (!metadata) fail(404,'素材文件不存在');
+  const size=metadata.size;
+  const headers=new Headers({'content-type':asset.mime,'content-length':String(size),'accept-ranges':'bytes','cache-control':'private, no-store','x-content-type-options':'nosniff'});
+  if (request.method==='HEAD') return new Response(null,{headers});
+  let range:{offset:number;length:number} | undefined;
+  // Ignore multipart/unknown units and conditional ranges without a matching validator.
+  const requested=request.headers.has('if-range') ? null : request.headers.get('range');
+  const match=requested?.match(/^bytes=(\d*)-(\d*)$/);
+  if (match && (match[1] || match[2])) {
+    const offset=match[1] ? Number(match[1]) : Math.max(0,size-Number(match[2]));
+    const end=match[1] && match[2] ? Math.min(size-1,Number(match[2])) : size-1;
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(end) || offset>=size || end<offset || (!match[1] && Number(match[2])===0)) {
+      headers.set('content-range',`bytes */${size}`);
+      headers.set('content-length','0');
+      return new Response(null,{status:416,headers});
+    }
+    range={offset,length:end-offset+1};
+    headers.set('content-range',`bytes ${offset}-${end}/${size}`);
+    headers.set('content-length',String(range.length));
+  }
+  const object=await env.ASSETS_BUCKET.get(asset.id,range ? {range} : undefined);
+  if (!object) fail(404,'素材文件不存在');
+  return new Response(object.body,{status:range ? 206 : 200,headers});
+}
+
+// Jobs accepted before frame chaining did not persist a snapshot; retain their old
+// single-frame interpretation rather than label them as newly chained videos.
+const legacyVideoSource=(shot:Shot):VideoSource=>({sourceFirstFrameId:shot.selectedCandidateId ?? '',sourceKey:videoSourceKey(shot.description.trim(),shot.dialogue.trim(),shot.duration)});
+const makeVideoCandidate=(url:string,duration:number|null,source:VideoSource):VideoCandidate=>({id:crypto.randomUUID(),url,createdAt:new Date().toISOString(),duration,...source});
+
+type VideoJob={title:string;prompt:string;duration:number;source:VideoSource;firstFrame:FirstFrameImage;lastFrame:FirstFrameImage|null};
+
+async function runVideoGeneration(env:ApiEnv,owner:string,id:string,shotId:string,generationId:string,job:VideoJob,fetcher?:typeof fetch):Promise<Project | null> {
+  const runtime=resolveVideoRuntime(env);
+  if (!runtime.key) throw new Error('请配置百炼 API Key');
+  const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+  let taskId:string;
+  try {
+    taskId=await submitWanVideoTask({key:runtime.key,model:runtime.model,baseUrl:runtime.baseUrl,prompt:job.prompt,firstFrame:job.firstFrame,lastFrame:job.lastFrame,duration:job.duration,fetcher});
+  } catch (error) {
+    const message=(error instanceof Error ? error.message : '视频生成失败').slice(0,500);
+    await videoGenerationResult(env,owner,id,shotId,generationId,undefined,message).catch(()=>{});
+    throw error instanceof Error ? error : new Error(message);
+  }
+  // Once accepted, query/download failures must preserve this task rather than submit
+  // a second generation. Persist its id before the first query so GET can resume it.
+  await videoTaskAssigned(env,owner,id,shotId,generationId,taskId);
+  const deadline=Date.now()+4.5*60_000;
+  while (Date.now()<deadline) {
+    let task;
+    try {
+      task=await checkWanVideoTask({key:runtime.key,taskId,baseUrl:runtime.baseUrl,fetcher});
+    } catch {
+      return deferVideoTask(env,owner,id,shotId,generationId,taskId);
+    }
+    if (task.status==='SUCCEEDED' && task.videoUrl) {
+      let url:string;
+      try {
+        url=await storeVideoAsset(env,owner,job.title,task.videoUrl,fetcher);
+      } catch {
+        return deferVideoTask(env,owner,id,shotId,generationId,taskId);
+      }
+      return videoGenerationResult(env,owner,id,shotId,generationId,makeVideoCandidate(url,task.duration ?? job.duration,job.source));
+    }
+    if (task.error) {
+      await videoGenerationResult(env,owner,id,shotId,generationId,undefined,task.error);
+      throw new Error(task.error);
+    }
+    await videoTaskAssigned(env,owner,id,shotId,generationId,taskId);
+    await sleep(15_000);
+  }
+  return null;
+}
+
+async function pollPendingVideos(env:ApiEnv,owner:string,project:Project,fetcher?:typeof fetch):Promise<Project | null> {
+  const runtime=resolveVideoRuntime(env);
+  const key=runtime.key;
+  const now=Date.now();
+  let latest:Project | null=null;
+  let touched=false;
+  const record=async (action:()=>Promise<Project>):Promise<void>=>{
+    touched=true;
+    try { latest=await action(); } catch { /* superseded; fall back to a fresh read below */ }
+  };
+  for (const shot of project.shots) {
+    const video=shot.video;
+    const generationId=video.generationId;
+    if (video.status!=='generating' || !generationId) continue;
+    const startedAt=video.generationStartedAt ? Date.parse(video.generationStartedAt) : 0;
+    const lastPolled=video.polledAt ? Date.parse(video.polledAt) : startedAt;
+    const overdue=now-startedAt>STALE_VIDEO_MS;
+    if (video.taskId && now-lastPolled<20_000) continue;
+    const taskId=video.taskId;
+    if (!taskId) {
+      if (overdue) await record(()=>videoGenerationResult(env,owner,project.id,shot.id,generationId,undefined,'视频生成已中断，请重试。'));
+      continue;
+    }
+    if (!key) {
+      await record(()=>deferVideoTask(env,owner,project.id,shot.id,generationId,taskId,'视频服务配置不可用，恢复配置后继续查询原任务。'));
+      continue;
+    }
+    try {
+      const task=await checkWanVideoTask({key,taskId,baseUrl:runtime.baseUrl,fetcher});
+      if (task.status==='SUCCEEDED' && task.videoUrl) {
+        const url=await storeVideoAsset(env,owner,shot.title,task.videoUrl,fetcher);
+        await record(()=>videoGenerationResult(env,owner,project.id,shot.id,generationId,makeVideoCandidate(url,task.duration ?? clampVideoDuration(video.source?.sourceDuration ?? shot.duration),video.source ?? legacyVideoSource(shot))));
+      } else if (task.error) {
+        const message=task.error;
+        await record(()=>videoGenerationResult(env,owner,project.id,shot.id,generationId,undefined,message));
+      } else {
+        await record(()=>videoTaskAssigned(env,owner,project.id,shot.id,generationId,taskId));
+      }
+    } catch {
+      await record(()=>deferVideoTask(env,owner,project.id,shot.id,generationId,taskId));
+    }
+  }
+  return latest ?? (touched ? readProject(await rowFor(env,project.id,owner)) : null);
+}
+
+async function handleGenerateVideo(request:Request,env:ApiEnv,owner:string,id:string,fetcher?:typeof fetch,waitUntil?:(promise:Promise<unknown>)=>void):Promise<Response> {
+  const body=await bodyJson(request);
+  if (typeof body.shotId!=='string') fail(400,'请选择需要生成视频的镜头。');
+  if (!env.DASHSCOPE_API_KEY?.trim()) fail(503,'请配置百炼 API Key');
+  let job!:VideoJob;
+  let generationId='';
+  let startedSaved:Project | null=null;
+  for (let attempt=0;attempt<12 && !startedSaved;attempt++) {
+    const current=await loadRecovered(env,id,owner);
+    const found=current.shots.find(item=>item.id===body.shotId);
+    if (!found) fail(404,'镜头不存在。');
+    const { currentFrame, endFrame } = getVideoFrameContext(current,found);
+    if (found.video.status==='generating') fail(409,'视频正在生成，请稍候。');
+    if (!found.selectedCandidateId || !found.candidates.some(candidate=>candidate.id===found.selectedCandidateId)) fail(400,'请先为镜头选定一张候选图，再生成视频。');
+    if (found.video.candidates.length >= MAX_VIDEO_CANDIDATES) fail(400,`最多保留 ${MAX_VIDEO_CANDIDATES} 个视频候选。`);
+    // Description and speaker rules live in buildVideoPrompt; failures surface as 400 here.
+    let prompt='';
+    try { prompt=buildVideoPrompt(current,found); } catch (error) { fail(400,error instanceof Error ? error.message : '生成设定无效。'); }
+    const [reference,lastReference]=await Promise.all([
+      getReference(env,currentFrame!.url,owner,request.url),
+      endFrame ? getReference(env,endFrame.url,owner,request.url) : Promise.resolve(null),
+    ]);
+    job={title:found.title,prompt,duration:clampVideoDuration(found.duration),source:shotVideoSource(current,found),firstFrame:{bytes:reference.bytes,mime:reference.mime},lastFrame:lastReference ? {bytes:lastReference.bytes,mime:lastReference.mime} : null};
+    generationId=crypto.randomUUID();
+    const started={...current,shots:current.shots.map(item=>item.id===found.id ? {...item,video:{...item.video,status:'generating' as const,error:null,generationId,generationStartedAt:new Date().toISOString(),taskId:null,polledAt:null,source:job.source}} : item)};
+    startedSaved=await saveCas(env,started,owner,current.revision);
+  }
+  if (!startedSaved) fail(409,'Project changed repeatedly; retry');
+  const generation=runVideoGeneration(env,owner,id,body.shotId,generationId,job,fetcher);
+  waitUntil?.(generation.then(()=>undefined,()=>undefined));
+  if (waitUntil) return json({project:startedSaved},202);
+  try {
+    const result=await generation;
+    return json({project:result ?? readProject(await rowFor(env,id,owner))});
+  } catch (error) {
+    fail(502,error instanceof Error ? error.message : '视频生成失败');
+  }
+}
+
 export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetcher?:typeof fetch;waitUntil?:(promise:Promise<unknown>)=>void}={}):Promise<Response> {
   try {
     checkRequestOrigin(request,env.TRUST_PROXY==='1');
@@ -393,8 +613,8 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     const samplePath = `/api/projects/${SAMPLE_PROJECT_ID}`;
     if (path === samplePath && request.method === 'GET') return json({project:createSamplePreview()});
     const owner=(await requireUser(request,env)).id;
-    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public,storyboard:{configured:!!env.DASHSCOPE_API_KEY?.trim(),model:env.STORYBOARD_LLM_MODEL?.trim() || DEFAULT_STORYBOARD_MODEL}});
-    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-character` || path === `${samplePath}/generate-audio` || path === `${samplePath}/storyboard`) {
+    if (path==='/api/config' && request.method==='GET') return json({configured:!!((env.IMAGE_API_KEY || env.OPENAI_API_KEY) && env.IMAGE_MODEL?.trim()),model:env.IMAGE_MODEL?.trim() || '',speech:resolveSpeechProvider(env).public,storyboard:{configured:!!env.DASHSCOPE_API_KEY?.trim(),model:env.STORYBOARD_LLM_MODEL?.trim() || DEFAULT_STORYBOARD_MODEL},video:resolveVideoRuntime(env).public});
+    if ((path === samplePath && request.method !== 'GET') || path === `${samplePath}/generate` || path === `${samplePath}/generate-scene` || path === `${samplePath}/generate-character` || path === `${samplePath}/generate-audio` || path === `${samplePath}/generate-video` || path === `${samplePath}/storyboard`) {
       fail(403,'样例为只读，请先复制为我的作品。');
     }
     if (path === `${samplePath}/copy` && request.method === 'POST') {
@@ -449,11 +669,13 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       return json({project},201);
     }
     const assetMatch=path.match(uuidPath);
-    if (assetMatch && request.method==='GET') {
+    if (assetMatch && (request.method==='GET' || request.method==='HEAD')) {
       const asset=await env.DB.prepare('SELECT id, owner, mime, name FROM assets WHERE id = ? AND owner = ?').bind(assetMatch[1],owner).first<AssetRow>();
       if (!asset || asset.owner!==owner) fail(404,'素材不存在');
+      if (asset.mime==='video/mp4') return await serveVideoAsset(request,env,asset);
       const object=await env.ASSETS_BUCKET.get(asset.id);
       if (!object) fail(404,'素材文件不存在');
+      if (request.method==='HEAD') { await object.body.cancel(); return new Response(null,{headers:{'content-type':asset.mime,'cache-control':'private, no-store','x-content-type-options':'nosniff'}}); }
       return new Response(object.body,{headers:{'content-type':asset.mime,'cache-control':'private, no-store','x-content-type-options':'nosniff'}});
     }
     if (path==='/api/upload' && request.method==='POST') {
@@ -474,16 +696,28 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
     if (characterGenerateMatch && request.method==='POST') return await handleGenerateCharacter(request,env,owner,characterGenerateMatch[1],options.fetcher);
     const audioGenerateMatch=path.match(audioGenerationPath);
     if (audioGenerateMatch && request.method==='POST') return await handleGenerateAudio(request,env,owner,audioGenerateMatch[1],options.fetcher,options.waitUntil);
+    const videoGenerateMatch=path.match(videoGenerationPath);
+    if (videoGenerateMatch && request.method==='POST') return await handleGenerateVideo(request,env,owner,videoGenerateMatch[1],options.fetcher,options.waitUntil);
     const storyboardMatch=path.match(storyboardPath);
     if (storyboardMatch && request.method==='POST') return await handleStoryboard(request,env,owner,storyboardMatch[1],options.fetcher,options.waitUntil);
     const match=path.match(projectPath);
-    if (match && request.method==='GET') return json({project:await loadRecovered(env,match[1],owner)});
+    if (match && request.method==='GET') {
+      const project=await loadRecovered(env,match[1],owner);
+      // Video tasks outlive waitUntil; every poll is a chance to advance them. With a real
+      // waitUntil the advance (provider query + download) runs in the background so this
+      // hot path stays fast; the next poll cycle picks up the result.
+      const advance=pollPendingVideos(env,owner,project,options.fetcher);
+      if (options.waitUntil) { options.waitUntil(advance.then(()=>undefined,()=>undefined)); return json({project}); }
+      return json({project:(await advance.catch(()=>null)) ?? project});
+    }
     if (match && request.method==='PUT') {
       const current=await loadRecovered(env,match[1],owner);
       const body=await bodyJson(request);
       const proposed=normalizeProject(body?.project);
       try { validateProject(proposed); } catch (error) { fail(400,error instanceof Error ? error.message : 'Invalid project'); }
       if (proposed.id!==match[1] || proposed.revision!==current.revision) fail(409,'Project changed; reload and retry');
+      const videoConflict=videoFrameEditConflict(current,proposed) || generationDeletionConflict(current,proposed);
+      if (videoConflict) fail(400,videoConflict);
       await validateOwnedAssets(env,proposed,owner);
       const protectGeneration = <T extends GeneratedFrame>(items:T[], existing:T[]):T[] => {
         const byId = new Map(existing.map(s=>[s.id,s]));
@@ -497,8 +731,15 @@ export async function handleApiRequest(request:Request,env:ApiEnv,options:{fetch
       const existingShots=new Map(current.shots.map(shot=>[shot.id,shot]));
       safe.shots=safe.shots.map(shot=>{
         const old=existingShots.get(shot.id);
-        if (old?.audio.status==='generating') return {...shot,audio:{...shot.audio,url:old.audio.url,duration:old.audio.duration,sourceText:old.audio.sourceText,sourceVoice:old.audio.sourceVoice,sourceInstruction:old.audio.sourceInstruction,status:old.audio.status,error:old.audio.error,generationId:old.audio.generationId,generationStartedAt:old.audio.generationStartedAt}};
-        return {...shot,audio:{...shot.audio,status:shot.audio.status==='generating'?'idle':shot.audio.status,generationId:null,generationStartedAt:null}};
+        // Audio and video jobs are protected independently so parallel jobs never clobber
+        // each other; a job running on the server keeps its recorded state verbatim.
+        const audio=old?.audio.status==='generating'
+          ? old.audio
+          : {...shot.audio,status:shot.audio.status==='generating'?'idle':shot.audio.status,generationId:null,generationStartedAt:null};
+        const video=old?.video.status==='generating'
+          ? {...old.video,selectedVideoId:shot.video.selectedVideoId===null || old.video.candidates.some(candidate=>candidate.id===shot.video.selectedVideoId) ? shot.video.selectedVideoId : old.video.selectedVideoId}
+          : {...shot.video,status:shot.video.status==='generating'?'idle':shot.video.status,generationId:null,generationStartedAt:null,taskId:null,polledAt:null,source:null};
+        return {...shot,generationFrame:old?.status==='generating' ? old.generationFrame : shot.generationFrame,audio,video};
       });
       const saved=await saveCas(env,safe,owner,current.revision);
       if (!saved) fail(409,'Project changed; reload and retry');

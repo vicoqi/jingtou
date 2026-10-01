@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyShotAudio, getTimeline, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration, newStoryboardDraft, recoverStoryboardDraft, rebaseProjectEdits } from '../lib/domain.ts';
+import { emptyShotAudio, emptyShotVideo, getTimeline, videoSourceKey, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration, newStoryboardDraft, recoverStoryboardDraft, rebaseProjectEdits } from '../lib/domain.ts';
 import type { Project, Shot, StoryboardDraft } from '../lib/types.ts';
 
-const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
+const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), video: emptyShotVideo(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
 
 test('timeline preserves ordering and end boundary belongs to next shot', () => {
@@ -272,4 +272,13 @@ test('stale generating drafts recover to failed while keeping the story', () => 
   const fresh = structuredClone(project([]));
   (fresh as unknown as Record<string,unknown>).storyboardDraft = newStoryboardDraft('原始故事', 6, 'gen-2');
   assert.equal(recoverStoryboardDraft(fresh), null);
+});
+
+test('full-text video snapshots fold into a compact source key on read', () => {
+  const legacy = structuredClone(project([shot('v1')])) as { shots: Record<string, unknown>[] };
+  legacy.shots[0].video = { candidates: [{ id: 'vc1', url: '/api/assets/' + 'a'.repeat(36), createdAt: '2026-09-30T00:00:00.000Z', duration: 6, sourceFirstFrameId: 'cand-1', sourceDescription: '旧描述', sourceDialogue: '旧对白', sourceDuration: 6 }], selectedVideoId: 'vc1', taskId: null, polledAt: null, status: 'idle', error: null, generationId: null, generationStartedAt: null };
+  const normalized = normalizeProject(legacy);
+  const candidate = (normalized.shots[0] as Shot).video.candidates[0] as unknown as Record<string, unknown>;
+  assert.equal(candidate.sourceKey, videoSourceKey('旧描述', '旧对白', 6));
+  assert.equal('sourceDescription' in candidate, false);
 });

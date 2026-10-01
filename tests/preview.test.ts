@@ -108,3 +108,30 @@ test('zero pauses preserve legacy subtitles and missing audio still shows dialog
   assert.equal(empty.audioTime,0);
   assert.deepEqual(empty.timingIssues,[]);
 });
+
+test('selected videos play completely and use their duration for every preview boundary', () => {
+  const sequence = [
+    {...shots[0],duration:1,video:{selectedVideoId:'v1',candidates:[{id:'v1',url:'/one.mp4',duration:2}]}},
+    {...shots[1],duration:3.9,video:{selectedVideoId:'v2',candidates:[{id:'v2',url:'/two.mp4',duration:4}]}},
+    shots[3],
+  ];
+  const first=previewFrame(sequence,1.5);
+  assert.equal(first.video,'/one.mp4');
+  assert.equal(first.total,11);
+  assert.equal(first.duration,2);
+  assert.deepEqual(first.durations,[2,4,5]);
+  const second=previewFrame(sequence,2);
+  assert.equal(second.video,'/two.mp4');
+  assert.equal(second.start,2);
+  assert.equal(second.localTime,0);
+  assert.equal(previewFrame(sequence,6).shot?.id,shots[3].id);
+  assert.equal(sequence[0].duration,1);
+  assert.equal(previewFrame(sequence,0,()=>false,()=>false).total,9.9);
+});
+
+test('video duration falls back to shot length when metadata is absent and ignores unused TTS timing', () => {
+  const videoShot={...timedShot,duration:1,video:{selectedVideoId:'v',candidates:[{id:'v',url:'/video.mp4',duration:null}]}};
+  assert.equal(previewFrame([videoShot],0).total,1);
+  assert.deepEqual(previewFrame([videoShot],0).timingIssues,[]);
+  assert.equal(previewFrame([videoShot],0).audio,null);
+});

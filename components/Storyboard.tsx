@@ -21,10 +21,11 @@ export function StoryboardComposer({ busy, configured, initialStory, onClose, on
       setWorking(true);
       try { if (await onSubmit(trimmed, parsedCount)) onClose(); } finally { setWorking(false); }
     }}>
-      <p className="muted">粘贴一段故事，AI 会拆解成分镜草稿；确认之前不会改动作品。</p>
+      <p className="muted">粘贴一段故事，AI 会按完整动作和叙事需要拆成分镜草稿，同一机位的连续动作尽量保留在一个镜头内；确认之前不会改动作品。</p>
       <label>故事文本<textarea rows={10} value={story} maxLength={MAX_STORY_LENGTH} onChange={e => setStory(e.target.value)} placeholder="把你的故事粘贴到这里…" /></label>
       <p className="field-hint">{trimmed.length}/{MAX_STORY_LENGTH} 字符</p>
       <label>期望镜头数（可选）<input inputMode="numeric" value={count} onChange={e => setCount(e.target.value.replace(/[^0-9]/g, ''))} placeholder="4–60，留空由 AI 根据故事长度决定" /></label>
+      <p className="field-hint">镜头数量仅供参考，AI 优先保持动作完整，实际数量可能不同。</p>
       {!configured && <p className="notice warning">尚未配置百炼 API Key，请先在生成服务设置中了解配置方式。</p>}
       {!countValid && <p className="notice warning">期望镜头数必须是 4–60 的整数。</p>}
       <div className="modal-actions">

@@ -41,6 +41,21 @@ test('generation acknowledgement preserves edits made before its response and ad
   assert.equal(mergeGenerationAcknowledgement(local,incoming,false),incoming);
 });
 
+test('video generation acknowledgement adopts the server job state like audio', () => {
+  const incoming=createProject('视频测试');
+  incoming.shots=[newShot()];
+  const local=structuredClone(incoming);
+  local.shots[0].title='请求返回前改的标题';
+  local.shots[0].video={...local.shots[0].video,status:'generating',error:null,generationId:null,generationStartedAt:null};
+  incoming.revision++;
+  incoming.shots[0].video={...incoming.shots[0].video,status:'generating',generationId:'video-job',generationStartedAt:'2026-09-30T00:00:00Z',taskId:'task-1',polledAt:'2026-09-30T00:00:00Z'};
+  const merged=mergeGenerationAcknowledgement(local,incoming,true);
+  assert.equal(merged.shots[0].title,'请求返回前改的标题');
+  assert.equal(merged.shots[0].video.generationId,'video-job');
+  assert.equal(merged.shots[0].video.taskId,'task-1');
+  assert.equal(merged.revision,incoming.revision);
+});
+
 test('older acknowledgement cannot downgrade job results even when local edits are pending', () => {
   const current=createProject('节奏测试');
   current.shots=[newShot()];

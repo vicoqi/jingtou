@@ -17,6 +17,8 @@ interface Env {
   QWEN_TTS_MALE_VOICE?: string;
   STORYBOARD_LLM_MODEL?: string;
   STORYBOARD_LLM_BASE_URL?: string;
+  WAN_VIDEO_MODEL?: string;
+  WAN_VIDEO_BASE_URL?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
