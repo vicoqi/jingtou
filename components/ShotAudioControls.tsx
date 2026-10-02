@@ -1,5 +1,5 @@
 'use client';
-import { AlertCircle, LoaderCircle, Mic2, RefreshCw, Settings2, Volume2 } from 'lucide-react';
+import { AlertCircle, LoaderCircle, Mic2, RefreshCw, Volume2 } from 'lucide-react';
 import { isShotAudioStale } from '../lib/domain';
 import type { Project, Shot } from '../lib/types';
 
@@ -27,7 +27,7 @@ export function ShotAudioControls({project,shot,disabled,speechConfigured,onChan
     {!speakers.length && <p className="audio-hint">先在上方选择出场角色，再指定本镜头的说话角色。</p>}
     {shot.audio.url && <audio key={shot.audio.url} className="shot-audio-player" controls preload="metadata" src={shot.audio.url}>浏览器不支持音频播放。</audio>}
     {shot.audio.error && <p className="audio-error"><AlertCircle size={13} />{shot.audio.error}</p>}
-    <div className="shot-audio-actions"><button type="button" className="button compact" disabled={disabled || generating || invalid} onClick={speechConfigured ? onGenerate : onSettings}>{generating ? <LoaderCircle size={14} className="spin" /> : ready ? <RefreshCw size={14} /> : <Volume2 size={14} />}{generating ? '生成中' : ready ? '重新生成配音' : '生成配音'}</button><button type="button" className="icon-button" aria-label="查看配音配置" title="配音配置" onClick={onSettings}><Settings2 size={13} /></button></div>
+    <div className="shot-audio-actions"><button type="button" className="button compact" disabled={disabled || generating || invalid} onClick={speechConfigured ? onGenerate : onSettings}>{generating ? <LoaderCircle size={14} className="spin" /> : ready ? <RefreshCw size={14} /> : <Volume2 size={14} />}{generating ? '生成中' : ready ? '重新生成配音' : '生成配音'}</button></div>
     <p className="audio-hint">生成失败时会保留上一版配音；修改对白、语气或角色音色后需手动重新生成。</p>
   </div>;
 }
