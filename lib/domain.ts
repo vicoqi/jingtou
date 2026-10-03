@@ -1,7 +1,7 @@
 import type { Candidate, GeneratedFrame, GenerationKind, Project, ProjectSummary, Scene, Shot, ShotAudio, ShotVideo, StoryboardDraft, VideoCandidate, VideoSource } from './types.ts';
 import { newId } from './id.ts';
 import { MAX_PAUSE_DURATION, MAX_SHOT_DURATION } from './shot-timing.ts';
-import { getVideoFrameContext } from './video-frames.ts';
+import { getVideoFrameContext, isVideoFrameLocked } from './video-frames.ts';
 import { validVideoTrim } from './video-trim.ts';
 
 export const MAX_STORY_LENGTH = 20_000;
@@ -53,6 +53,25 @@ export function generationDeletionConflict(current:Project,proposed:Project):str
     if (scene.status==='generating' && !proposed.scenes?.some(item=>item.id===scene.id)) return '生成期间不能删除正在生成的场景，请等待生成完成。';
   }
   return null;
+}
+
+// Selected candidates anchor validateProject's selected-id rule; generated
+// takes keep referencing their source frames for posters; any running image or
+// video job locks the list. Only truly unreferenced ones may be removed.
+export function isShotCandidateRemovable(project: Project, shot: Shot, candidateId: string): boolean {
+  if (shot.status === 'generating' || isVideoFrameLocked(project, shot.id)) return false;
+  if (candidateId === shot.selectedCandidateId || candidateId === shot.selectedEndCandidateId) return false;
+  return !shot.video.candidates.some(take => take.sourceFirstFrameId === candidateId || take.sourceLastFrameId === candidateId);
+}
+
+export function isSceneCandidateRemovable(scene: Scene, candidateId: string): boolean {
+  if (scene.status === 'generating') return false;
+  return candidateId !== scene.selectedCandidateId;
+}
+
+export function isVideoCandidateRemovable(shot: Shot, videoId: string): boolean {
+  if (shot.video.status === 'generating') return false;
+  return videoId !== shot.video.selectedVideoId;
 }
 
 export function getTimeline(shots: Shot[]): { shot: Shot; start: number; end: number }[] {
@@ -162,8 +181,16 @@ function validVideoSource(value: unknown): boolean {
     && isString(value.sourceKey) && /^[0-9a-f]{16}$/.test(value.sourceKey);
 }
 
+const normalizeTombstones = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value) || !value.length) return undefined;
+  const ids = value.filter(isString);
+  return ids.length ? ids : undefined;
+};
+
 function normalizeShotVideo(value: unknown): ShotVideo {
-  const base = { ...emptyShotVideo(), ...(isRecord(value) ? value : {}) } as ShotVideo & { candidates: unknown[] };
+  const { removedCandidateIds, ...rest } = { ...emptyShotVideo(), ...(isRecord(value) ? value : {}) } as ShotVideo;
+  const tombstones = normalizeTombstones(removedCandidateIds);
+  const base = { ...rest, ...(tombstones ? { removedCandidateIds: tombstones } : {}) } as ShotVideo & { candidates: unknown[] };
   // Candidates written before source keys stored full text snapshots; fold them into the
   // compact key on read so oversized documents shrink below D1's 1MB row limit.
   base.candidates = base.candidates.map((candidate: unknown): VideoCandidate => {
@@ -194,8 +221,11 @@ export function normalizeProject(value: unknown): Project {
         ? { ...shot.audio, sourceInstruction: shot.audio.url ? '' : null }
         : shot.audio;
     const video = normalizeShotVideo(shot.video);
+    const { removedCandidateIds, ...rest } = shot;
+    const tombstones = normalizeTombstones(removedCandidateIds);
     return {
-      ...shot,
+      ...rest,
+      ...(tombstones ? { removedCandidateIds: tombstones } : {}),
       showSubtitle: shot.showSubtitle === undefined ? true : shot.showSubtitle,
       voiceInstruction: shot.voiceInstruction === undefined ? '' : shot.voiceInstruction,
       endFrameDescription: shot.endFrameDescription === undefined ? '' : shot.endFrameDescription,
@@ -207,11 +237,22 @@ export function normalizeProject(value: unknown): Project {
       video,
     };
   }) : value.shots;
-  return { ...value, scenes: Array.isArray(value.scenes) ? value.scenes : [], characters, shots, storyboardDraft: value.storyboardDraft === undefined ? null : value.storyboardDraft } as Project;
+  const scenes = Array.isArray(value.scenes) ? value.scenes.map(scene => {
+    if (!isRecord(scene)) return scene;
+    const { removedCandidateIds, ...rest } = scene;
+    const tombstones = normalizeTombstones(removedCandidateIds);
+    return tombstones ? { ...rest, removedCandidateIds: tombstones } : rest;
+  }) : [];
+  return { ...value, scenes, characters, shots, storyboardDraft: value.storyboardDraft === undefined ? null : value.storyboardDraft } as Project;
 }
 
 function assertSelectedId(selected: unknown, ids: Set<string>, label: string): void {
   if (!(selected === null || (isString(selected) && ids.has(selected)))) throw new Error(label);
+}
+
+function validateTombstones(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 400 || value.some(id => !isString(id))) throw new Error('Invalid removed candidate ids');
 }
 
 function validateCandidates(value: Record<string, unknown>): void {
@@ -223,6 +264,7 @@ function validateCandidates(value: Record<string, unknown>): void {
     ids.add(c.id);
   }
   assertSelectedId(value.selectedCandidateId, ids, 'Invalid selected candidate');
+  validateTombstones(value.removedCandidateIds);
 }
 
 function validateStoryboardDraft(value: unknown): void {
@@ -279,6 +321,7 @@ export function validateProject(value: unknown): asserts value is Project {
     if (s.audio.status === 'generating' && (!s.audio.generationId || !s.audio.generationStartedAt)) throw new Error('Invalid shot audio generation');
     const v = s.video;
     if (!isRecord(v) || !Array.isArray(v.candidates) || v.candidates.length > MAX_VIDEO_CANDIDATES || !['idle','generating','failed'].includes(String(v.status)) || !(v.taskId === null || isString(v.taskId)) || !(v.polledAt === null || isString(v.polledAt)) || !(v.error === null || isString(v.error)) || !(v.generationId === null || isString(v.generationId)) || !(v.generationStartedAt === null || isString(v.generationStartedAt))) throw new Error('Invalid shot video');
+    validateTombstones(v.removedCandidateIds);
     if (v.source !== undefined && v.source !== null && !validVideoSource(v.source)) throw new Error('Invalid shot video source');
     const videoIds = new Set<string>();
     for (const c of v.candidates as unknown[]) {
@@ -303,21 +346,27 @@ export function mergeGeneration(current: Project, shotId: string, generationId: 
 }
 
 function mergeGeneratedFrame<T extends GeneratedFrame>(local:T,remote:T):T {
+  const { removedCandidateIds: localRemoved, ...localRest } = local;
+  const removed=new Set(localRemoved ?? []);
   const candidates=[...local.candidates];
   const ids=new Set(candidates.map(candidate=>candidate.id));
-  for (const candidate of remote.candidates) if (!ids.has(candidate.id)) candidates.push(candidate);
+  for (const candidate of remote.candidates) if (!ids.has(candidate.id) && !removed.has(candidate.id)) candidates.push(candidate);
   const selectedCandidateId=local.selectedCandidateId && candidates.some(candidate=>candidate.id===local.selectedCandidateId)
     ? local.selectedCandidateId
     : remote.selectedCandidateId;
+  // Tombstones for ids the server no longer carries have done their job: the
+  // deletion persisted, so they are dropped instead of accumulating forever.
+  const remainingRemoved=[...removed].filter(id=>remote.candidates.some(candidate=>candidate.id===id));
   return {
-    ...local,
+    ...localRest,
     candidates,
     selectedCandidateId,
+    ...(remainingRemoved.length ? { removedCandidateIds: remainingRemoved } : {}),
     status:remote.status,
     error:remote.error,
     generationId:remote.generationId,
     generationStartedAt:remote.generationStartedAt,
-  };
+  } as T;
 }
 
 export function rebaseProjectEdits(local:Project,remote:Project):Project {
@@ -332,13 +381,26 @@ export function rebaseProjectEdits(local:Project,remote:Project):Project {
       const remoteShot=remoteShots.get(shot.id);
       if (!remoteShot) return shot;
       const localVideos = new Map(shot.video.candidates.map(candidate=>[candidate.id,candidate]));
-      const candidates = remoteShot.video.candidates.map(candidate=>{
-        const localCandidate=localVideos.get(candidate.id);
-        return localCandidate ? {...candidate,trimStart:localCandidate.trimStart ?? 0,trimEnd:localCandidate.trimEnd ?? 0} : candidate;
+      // Local deletions win over the remote union; remote additions are adopted.
+      const removedVideos = new Set(shot.video.removedCandidateIds ?? []);
+      const candidates = shot.video.candidates.map(candidate=>{
+        const remoteCandidate=remoteShot.video.candidates.find(item=>item.id===candidate.id);
+        return remoteCandidate ? {...remoteCandidate,trimStart:candidate.trimStart ?? 0,trimEnd:candidate.trimEnd ?? 0} : candidate;
       });
+      for (const candidate of remoteShot.video.candidates) {
+        if (!localVideos.has(candidate.id) && !removedVideos.has(candidate.id)) candidates.push(candidate);
+      }
+      const remainingRemovedVideos=[...removedVideos].filter(id=>remoteShot.video.candidates.some(candidate=>candidate.id===id));
       const selectedVideoId=shot.video.selectedVideoId && candidates.some(candidate=>candidate.id===shot.video.selectedVideoId)
         ? shot.video.selectedVideoId : remoteShot.video.selectedVideoId;
-      return {...mergeGeneratedFrame(shot,remoteShot),generationFrame:remoteShot.generationFrame,audio:remoteShot.audio,video:{...remoteShot.video,candidates,selectedVideoId}};
+      const video={...remoteShot.video,candidates,selectedVideoId};
+      if (remainingRemovedVideos.length) video.removedCandidateIds=remainingRemovedVideos;
+      else delete video.removedCandidateIds;
+      const merged={...mergeGeneratedFrame(shot,remoteShot),audio:remoteShot.audio,video};
+      // Absent on the remote means no pending frame generation; do not leave the key behind.
+      if (remoteShot.generationFrame!==undefined) merged.generationFrame=remoteShot.generationFrame;
+      else delete merged.generationFrame;
+      return merged;
     }),
     scenes:(local.scenes ?? []).map(scene=>{
       const remoteScene=remoteScenes.get(scene.id);

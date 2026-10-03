@@ -1,16 +1,19 @@
 'use client';
 import { useRef, useState, type ChangeEvent } from 'react';
-import { Check, CheckCircle2, LoaderCircle, Maximize2, Sparkles, Upload } from 'lucide-react';
-import type { Candidate, Shot } from '../lib/types';
+import { Check, CheckCircle2, LoaderCircle, Maximize2, Sparkles, Upload, X } from 'lucide-react';
+import type { Candidate, Project, Shot } from '../lib/types';
+import { isShotCandidateRemovable } from '../lib/domain';
 import { Modal } from './Modal';
 
-export function ShotEndFrameModal({shot,disabled,locked,configured,generationError,onChange,onGenerate,onUpload,onClose}:{
+export function ShotEndFrameModal({project,shot,disabled,locked,configured,generationError,onChange,onRemoveCandidate,onGenerate,onUpload,onClose}:{
+  project:Project;
   shot:Shot;
   disabled:boolean;
   locked:boolean;
   configured:boolean;
   generationError:string;
   onChange:(patch:Partial<Shot>)=>void;
+  onRemoveCandidate:(candidateId:string)=>void;
   onGenerate:(count:number)=>void;
   onUpload:(files:File[])=>Promise<void>;
   onClose:()=>void;
@@ -33,6 +36,11 @@ export function ShotEndFrameModal({shot,disabled,locked,configured,generationErr
     setError('');
     try { await onUpload(files); } catch(e) { setError((e as Error).message); }
   };
+  const remove=(candidateId:string)=>{
+    if (disabled || locked || !isShotCandidateRemovable(project,shot,candidateId)) return;
+    onRemoveCandidate(candidateId);
+    if (zoom?.id===candidateId) setZoom(null);
+  };
   return <>
     <Modal title={`${shot.title || '当前镜头'} · 尾帧设置`} wide onClose={onClose}>
       <div className="modal-form end-frame-editor">
@@ -53,7 +61,7 @@ export function ShotEndFrameModal({shot,disabled,locked,configured,generationErr
         <div className="candidates">{[...shot.candidates].reverse().map(candidate=>{
           const chosen=candidate.id===shot.selectedEndCandidateId;
           return <div className={`candidate ${chosen ? 'chosen' : ''}`} key={candidate.id}>
-            <button type="button" className="candidate-image" aria-label="放大尾帧候选图" onClick={()=>setZoom(candidate)}><img src={candidate.url} alt="尾帧候选画面" loading="lazy" /><span className="candidate-zoom"><Maximize2 size={16} /></span></button>
+            <button type="button" className="candidate-image" aria-label="放大尾帧候选图" onClick={()=>setZoom(candidate)}><img src={candidate.url} alt="尾帧候选画面" loading="lazy" /><span className="candidate-zoom"><Maximize2 size={16} /></span></button>{isShotCandidateRemovable(project,shot,candidate.id) && <button type="button" className="remove-candidate" disabled={disabled || locked} onClick={()=>remove(candidate.id)} aria-label={`删除尾帧候选图${shot.candidates.findIndex(item=>item.id===candidate.id)+1}`} title="删除这张候选图"><X size={13} /></button>}
             <div className="candidate-footer"><span>{candidate.frame==='end' ? '尾帧候选' : candidate.id===shot.selectedCandidateId ? '当前首帧' : '已有画面'}</span><button type="button" disabled={disabled || locked} className={chosen ? 'is-selected' : ''} onClick={()=>select(candidate)}>{chosen ? <><CheckCircle2 size={13} />已选尾帧</> : '选为尾帧'}</button></div>
           </div>;
         })}</div>

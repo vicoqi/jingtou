@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyShotAudio, emptyShotVideo, getTimeline, videoSourceKey, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration, newStoryboardDraft, recoverStoryboardDraft, rebaseProjectEdits } from '../lib/domain.ts';
-import type { Project, Shot, StoryboardDraft } from '../lib/types.ts';
+import { emptyShotAudio, emptyShotVideo, getTimeline, videoSourceKey, isShotAudioStale, shotAtTime, newShot, normalizeProject, validateProject, mergeGeneration, newStoryboardDraft, recoverStoryboardDraft, rebaseProjectEdits, isShotCandidateRemovable, isSceneCandidateRemovable, isVideoCandidateRemovable, newScene } from '../lib/domain.ts';
+import type { Candidate, Project, Scene, Shot, StoryboardDraft } from '../lib/types.ts';
 
 const shot = (id: string, duration = 5): Shot => ({ id, title: id, characterIds: [], scene: '', description: '', dialogue: '', showSubtitle: true, voiceInstruction: '', duration, audioLeadIn: 0, audioTailOut: 0, speakerCharacterId: null, audio: emptyShotAudio(), video: emptyShotVideo(), candidates: [], selectedCandidateId: null, status: 'idle', error: null, generationId: null, generationStartedAt: null });
 const project = (shots: Shot[]): Project => ({ id: 'p', name: 'Test', description: '', aspectRatio: '16:9', style: '', characters: [], shots, revision: 1, createdAt: '', updatedAt: '' });
+const candidateId = (n: number) => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`;
+const candidate = (n: number, frame?: 'start' | 'end'): Candidate => ({ id: candidateId(n), url: `/api/assets/${candidateId(n)}`, createdAt: '2026-10-01T00:00:00.000Z', prompt: '', batchId: 'b', source: 'generated', ...(frame ? { frame } : {}) });
+const take = (n: number, firstFrame: number): Shot['video']['candidates'][number] => ({ id: candidateId(n), url: `/api/assets/${candidateId(n)}`, createdAt: '2026-10-01T00:00:00.000Z', duration: 4, sourceFirstFrameId: candidateId(firstFrame), sourceKey: '0123456789abcdef' });
 
 test('timeline preserves ordering and end boundary belongs to next shot', () => {
   const shots = [shot('a', 3), shot('b', 7)];
@@ -281,4 +284,68 @@ test('full-text video snapshots fold into a compact source key on read', () => {
   const candidate = (normalized.shots[0] as Shot).video.candidates[0] as unknown as Record<string, unknown>;
   assert.equal(candidate.sourceKey, videoSourceKey('旧描述', '旧对白', 6));
   assert.equal('sourceDescription' in candidate, false);
+});
+
+test('shot candidates anchor selections, video takes and generation', () => {
+  const target = { ...shot('s'), candidates: [candidate(1), candidate(2, 'end'), candidate(3)], selectedCandidateId: candidateId(1), selectedEndCandidateId: candidateId(2) };
+  const home = project([target]);
+  assert.equal(isShotCandidateRemovable(home, target, candidateId(3)), true);
+  assert.equal(isShotCandidateRemovable(home, target, candidateId(1)), false, 'selected first frame stays');
+  assert.equal(isShotCandidateRemovable(home, target, candidateId(2)), false, 'selected end frame stays');
+  const generating = project([{ ...target, status: 'generating' as const }]);
+  assert.equal(isShotCandidateRemovable(generating, generating.shots[0], candidateId(3)), false, 'image generation locks all candidates');
+  const withTakes = project([{ ...target, video: { ...emptyShotVideo(), candidates: [take(4, 3)] } }]);
+  assert.equal(isShotCandidateRemovable(withTakes, withTakes.shots[0], candidateId(3)), false, 'frame referenced by a generated take stays');
+  assert.equal(isShotCandidateRemovable(withTakes, withTakes.shots[0], candidateId(1)), false);
+  const chained = project([
+    { ...target, id: 'a', candidates: [candidate(3)], selectedCandidateId: candidateId(3) },
+    { ...shot('b'), video: { ...emptyShotVideo(), status: 'generating' as const, source: { sourceFirstFrameId: candidateId(3), sourcePreviousShotId: 'a', sourceKey: '0123456789abcdef' } } },
+  ]);
+  assert.equal(isShotCandidateRemovable(chained, chained.shots[0], candidateId(3)), false, 'frame feeding a next-shot video stays');
+});
+
+test('scene candidates anchor the selected reference image', () => {
+  const scene: Scene = { ...newScene(), id: 'sc', name: 'S', description: '', candidates: [candidate(1), candidate(3)], selectedCandidateId: candidateId(1) };
+  assert.equal(isSceneCandidateRemovable(scene, candidateId(3)), true);
+  assert.equal(isSceneCandidateRemovable(scene, candidateId(1)), false, 'selected scene reference stays');
+  assert.equal(isSceneCandidateRemovable({ ...scene, status: 'generating' as const }, candidateId(3)), false, 'scene generation locks all candidates');
+});
+
+test('video candidates anchor the selected take and generation', () => {
+  const target = { ...shot('s'), video: { ...emptyShotVideo(), candidates: [take(1, 1), take(2, 1)], selectedVideoId: candidateId(1) } };
+  assert.equal(isVideoCandidateRemovable(target, candidateId(2)), true);
+  assert.equal(isVideoCandidateRemovable(target, candidateId(1)), false, 'selected take stays');
+  assert.equal(isVideoCandidateRemovable({ ...target, video: { ...target.video, status: 'generating' as const } }, candidateId(2)), false, 'video generation locks all takes');
+});
+
+test('rebase keeps local candidate deletions and adopts remote additions', () => {
+  const local = project([{ ...shot('s'), candidates: [candidate(1), candidate(3)], selectedCandidateId: candidateId(1), removedCandidateIds: [candidateId(2)] }]);
+  const remote = project([{ ...shot('s'), candidates: [candidate(1), candidate(2), candidate(4)], selectedCandidateId: candidateId(1) }]);
+  remote.revision++;
+  const rebased = rebaseProjectEdits(local, remote);
+  const ids = rebased.shots[0].candidates.map(item => item.id);
+  assert.ok(!ids.includes(candidateId(2)), 'locally deleted candidate must not come back');
+  assert.ok(ids.includes(candidateId(4)), 'remotely generated candidate is adopted');
+  assert.deepEqual(rebased.shots[0].removedCandidateIds, [candidateId(2)], 'tombstone survives while the server still carries the id');
+  assert.doesNotThrow(() => validateProject(rebased));
+});
+
+test('rebase drops tombstones once the deletion has persisted', () => {
+  const local = project([{ ...shot('s'), candidates: [candidate(1)], selectedCandidateId: candidateId(1), removedCandidateIds: [candidateId(2)] }]);
+  const remote = project([{ ...shot('s'), candidates: [candidate(1)], selectedCandidateId: candidateId(1) }]);
+  remote.revision++;
+  const rebased = rebaseProjectEdits(local, remote);
+  assert.equal(rebased.shots[0].removedCandidateIds, undefined, 'persisted tombstone is dropped without leaving the key behind');
+});
+
+test('rebase keeps local video deletions and adopts remote takes', () => {
+  const local = project([{ ...shot('s'), video: { ...emptyShotVideo(), candidates: [take(1, 1)], selectedVideoId: candidateId(1), removedCandidateIds: [candidateId(2)] } }]);
+  const remote = project([{ ...shot('s'), video: { ...emptyShotVideo(), candidates: [take(1, 1), take(2, 1), take(3, 1)], selectedVideoId: candidateId(1) } }]);
+  remote.revision++;
+  const rebased = rebaseProjectEdits(local, remote);
+  const ids = rebased.shots[0].video.candidates.map(item => item.id);
+  assert.ok(!ids.includes(candidateId(2)), 'locally deleted take must not come back');
+  assert.ok(ids.includes(candidateId(3)), 'remotely generated take is adopted');
+  assert.deepEqual(rebased.shots[0].video.removedCandidateIds, [candidateId(2)]);
+  assert.doesNotThrow(() => validateProject(rebased));
 });

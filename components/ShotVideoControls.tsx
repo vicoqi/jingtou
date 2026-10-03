@@ -1,6 +1,6 @@
 'use client';
-import { AlertCircle, CheckCircle2, Film, LoaderCircle, RefreshCw } from 'lucide-react';
-import { isShotVideoStale, MAX_VIDEO_CANDIDATES } from '../lib/domain';
+import { AlertCircle, CheckCircle2, Film, LoaderCircle, RefreshCw, X } from 'lucide-react';
+import { isShotVideoStale, isVideoCandidateRemovable, MAX_VIDEO_CANDIDATES } from '../lib/domain';
 import { selectedMediaUrl } from '../lib/playback';
 import { getVideoFrameContext, videoFirstFrameUrl } from '../lib/video-frames';
 import type { Candidate, Project, Shot } from '../lib/types';
@@ -50,11 +50,12 @@ export function ShotVideoControls({project,shot,disabled,videoConfigured,onGener
   </fieldset>;
 }
 
-export function ShotVideoCandidates({project,shot,disabled,onSelect}:{
+export function ShotVideoCandidates({project,shot,disabled,onSelect,onRemove}:{
   project:Project;
   shot:Shot;
   disabled:boolean;
   onSelect:(videoId:string)=>void;
+  onRemove:(videoId:string)=>void;
 }) {
   if (!shot.video.candidates.length) return null;
   return <>
@@ -62,7 +63,7 @@ export function ShotVideoCandidates({project,shot,disabled,onSelect}:{
     <div className="candidates">{shot.video.candidates.map((video,i) => {
       const chosen=video.id===shot.video.selectedVideoId;
       return <div className={`candidate video-candidate ${chosen ? 'chosen' : ''}`} key={video.id}>
-        <div className="video-candidate-media"><video src={video.url} poster={videoFirstFrameUrl(project,shot,video)} controls playsInline preload="none" aria-label={`视频候选 ${i + 1}`} />{chosen && <span className="video-candidate-selected"><CheckCircle2 size={12} />用于成片</span>}</div>
+        <div className="video-candidate-media"><video src={video.url} poster={videoFirstFrameUrl(project,shot,video)} controls playsInline preload="none" aria-label={`视频候选 ${i + 1}`} />{chosen && <span className="video-candidate-selected"><CheckCircle2 size={12} />用于成片</span>}{isVideoCandidateRemovable(shot,video.id) && <button type="button" className="remove-candidate" disabled={disabled} onClick={() => onRemove(video.id)} aria-label={`删除视频候选${i + 1}`} title="删除这个视频候选"><X size={13} /></button>}</div>
         <div className="candidate-footer"><span>{pad(i)}<small>{video.duration ? `${video.duration}s` : '视频'}</small></span><button type="button" disabled={disabled} aria-label={`选用视频候选${i + 1}`} aria-pressed={chosen} className={chosen ? 'is-selected' : ''} onClick={() => onSelect(video.id)}>{chosen ? <><CheckCircle2 size={13} />已选定</> : '选为成片'}</button></div>
       </div>;
     })}</div>

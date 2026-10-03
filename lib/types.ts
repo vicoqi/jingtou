@@ -3,7 +3,10 @@ export type ReferenceImage = { id: string; url: string; name: string };
 export type VoiceGender = 'female' | 'male';
 export type Character = { id: string; name: string; description: string; voice: VoiceGender; references: ReferenceImage[] };
 export type Candidate = { id: string; url: string; createdAt: string; prompt: string; batchId: string; source: 'generated' | 'uploaded' | 'sample'; frame?: 'start' | 'end' };
-export type GeneratedFrame = { id: string; candidates: Candidate[]; selectedCandidateId: string | null; status: 'idle' | 'generating' | 'failed'; error: string | null; generationId: string | null; generationStartedAt: string | null };
+// removedCandidateIds are deletion tombstones: conflict rebase unions remote
+// candidates back in, so deletions must be recorded until the server no longer
+// carries the id. Emptied during merge once the deletion has persisted.
+export type GeneratedFrame = { id: string; candidates: Candidate[]; removedCandidateIds?: string[]; selectedCandidateId: string | null; status: 'idle' | 'generating' | 'failed'; error: string | null; generationId: string | null; generationStartedAt: string | null };
 export type ShotAudio = { url: string | null; duration: number | null; sourceText: string | null; sourceVoice: VoiceGender | null; sourceInstruction: string | null; status: 'idle' | 'generating' | 'failed'; error: string | null; generationId: string | null; generationStartedAt: string | null };
 // Each candidate records a compact key of the shot inputs it was generated from (hash, not
 // full text — the project document must stay under D1's 1MB row limit), so staleness is judged
@@ -11,7 +14,7 @@ export type ShotAudio = { url: string | null; duration: number | null; sourceTex
 // videos from historical frame chains and new independent shot frames.
 export type VideoSource = { sourceMode?: 'independent'; sourceFirstFrameId: string; sourceLastFrameId?: string; sourcePreviousShotId?: string; sourceDuration?: number; sourceKey: string };
 export type VideoCandidate = VideoSource & { id: string; url: string; createdAt: string; duration: number | null; trimStart?: number; trimEnd?: number };
-export type ShotVideo = { candidates: VideoCandidate[]; selectedVideoId: string | null; taskId: string | null; polledAt: string | null; source?: VideoSource | null; status: 'idle' | 'generating' | 'failed'; error: string | null; generationId: string | null; generationStartedAt: string | null };
+export type ShotVideo = { candidates: VideoCandidate[]; removedCandidateIds?: string[]; selectedVideoId: string | null; taskId: string | null; polledAt: string | null; source?: VideoSource | null; status: 'idle' | 'generating' | 'failed'; error: string | null; generationId: string | null; generationStartedAt: string | null };
 export type GenerationKind = 'shots' | 'scenes';
 export type Scene = GeneratedFrame & { name: string; description: string; style?: string };
 export type Shot = GeneratedFrame & { title: string; characterIds: string[]; scene: string; sceneId?: string | null; description: string; endFrameDescription?: string; selectedEndCandidateId?: string | null; generationFrame?: 'start' | 'end'; dialogue: string; showSubtitle: boolean; voiceInstruction: string; duration: number; audioLeadIn: number; audioTailOut: number; speakerCharacterId: string | null; audio: ShotAudio; video: ShotVideo };

@@ -1,8 +1,8 @@
 'use client';
 import { useRef, useState, type ChangeEvent } from 'react';
-import { AlertCircle, Check, ImagePlus, LoaderCircle, Maximize2, Mountain, Pencil, Plus, RotateCcw, Sparkles, Trash2, Upload } from 'lucide-react';
+import { AlertCircle, Check, ImagePlus, LoaderCircle, Maximize2, Mountain, Pencil, Plus, RotateCcw, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import type { Candidate, Project, Scene } from '../lib/types';
-import { newScene, removeScene } from '../lib/domain';
+import { isSceneCandidateRemovable, newScene, removeScene } from '../lib/domain';
 import { newId } from '../lib/id';
 import { uploadImage } from '../lib/client';
 import { PROJECT_STYLE_PRESETS } from '../lib/project-defaults';
@@ -39,6 +39,10 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
   function patch(patch: Partial<Scene>) {
     if (!scene || disabled) return;
     update(p => ({ ...p, scenes: (p.scenes ?? []).map(s => s.id === scene.id ? { ...s, ...patch } : s) }));
+  }
+  function removeCandidate(id: string) {
+    if (!scene || disabled || !isSceneCandidateRemovable(scene, id)) return;
+    update(p => ({ ...p, scenes: (p.scenes ?? []).map(s => s.id !== scene.id ? s : { ...s, candidates: s.candidates.filter(item => item.id !== id), removedCandidateIds: [...(s.removedCandidateIds ?? []), id] }) }));
   }
   function save() {
     if (disabled || !editing?.name.trim()) return;
@@ -79,7 +83,7 @@ export function Scenes({ project, update, busy, readOnly, onGenerate, onUploadin
         </div>
         {scene.error && <div className="notice error" role="alert"><AlertCircle size={16} /><span>{scene.error}</span></div>}
         <div className="candidate-heading"><div><h3>场景候选图 <span>{scene.candidates.length}</span></h3><p>选定一张后，在分镜的「关联场景」中使用</p></div><button className="text-button" disabled={disabled} onClick={() => uploadRef.current?.click()}>{uploading ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}上传场景图</button><input ref={uploadRef} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" multiple disabled={disabled} onChange={e => void upload(e)} /></div>
-        <div className="candidates scene-candidates">{scene.candidates.map((c,i) => <div className={`candidate ${c.id === scene.selectedCandidateId ? 'chosen' : ''}`} key={c.id}><button className="candidate-image" aria-label={`放大场景候选图${i+1}`} onClick={() => setZoomId(c.id)}><img src={c.url} alt={`${scene.name}候选图 ${i+1}`} loading="lazy" /><span className="candidate-zoom"><Maximize2 size={17} /></span></button><div className="candidate-footer"><span>{String(i+1).padStart(2,'0')}<small>{c.source === 'generated' ? '生成' : c.source === 'sample' ? '示例' : '上传'}</small></span><button className={c.id === scene.selectedCandidateId ? 'is-selected' : ''} disabled={disabled} aria-label={`选用场景候选图${i+1}`} onClick={() => patch({ selectedCandidateId: c.id })}>{c.id === scene.selectedCandidateId ? <><Check size={13} />已选定</> : '选用'}</button></div></div>)}{!readOnly && <button className="candidate-add" disabled={disabled} onClick={() => uploadRef.current?.click()}><ImagePlus size={24} strokeWidth={1.3} /><span>上传已有场景</span><small>PNG、JPG、WebP · ≤10 MB</small></button>}</div>
+        <div className="candidates scene-candidates">{scene.candidates.map((c,i) => <div className={`candidate ${c.id === scene.selectedCandidateId ? 'chosen' : ''}`} key={c.id}><button className="candidate-image" aria-label={`放大场景候选图${i+1}`} onClick={() => setZoomId(c.id)}><img src={c.url} alt={`${scene.name}候选图 ${i+1}`} loading="lazy" /><span className="candidate-zoom"><Maximize2 size={17} /></span></button>{isSceneCandidateRemovable(scene, c.id) && <button className="remove-candidate" disabled={disabled} onClick={() => removeCandidate(c.id)} aria-label={`删除场景候选图${i+1}`} title="删除这张候选图"><X size={13} /></button>}<div className="candidate-footer"><span>{String(i+1).padStart(2,'0')}<small>{c.source === 'generated' ? '生成' : c.source === 'sample' ? '示例' : '上传'}</small></span><button className={c.id === scene.selectedCandidateId ? 'is-selected' : ''} disabled={disabled} aria-label={`选用场景候选图${i+1}`} onClick={() => patch({ selectedCandidateId: c.id })}>{c.id === scene.selectedCandidateId ? <><Check size={13} />已选定</> : '选用'}</button></div></div>)}{!readOnly && <button className="candidate-add" disabled={disabled} onClick={() => uploadRef.current?.click()}><ImagePlus size={24} strokeWidth={1.3} /><span>上传已有场景</span><small>PNG、JPG、WebP · ≤10 MB</small></button>}</div>
         <div className="notice scene-note"><Mountain size={16} /><span>更新场景设定或参考图后，关联分镜的后续生成会使用新设定。已有分镜画面和选图会保留。</span></div>
       </div>
     </div>}
